@@ -4,7 +4,25 @@ The ThinkPad runs the simulator and talks to the DE1 over USB-Blaster.
 A browser on the same Wi-Fi renders the waveform locally. Future Three.js
 views can use the same WebSocket feed.
 
-## Start on the ThinkPad
+## Start everything together
+
+From the repository root in WSL, with the DE1 powered on and USB-Blaster connected:
+
+```bash
+bash start.sh
+```
+
+The launcher builds Next.js, invokes Windows PowerShell to compile and
+program the DE1 with Quartus, then starts FastAPI and Next.js. Open
+[localhost:3000](http://localhost:3000). Press Ctrl+C to stop the stack.
+
+Use `bash start.sh --skip-program` when the DE1 already holds the current
+bitstream, or `bash start.sh --reference` to use the Python detector. Add
+`--lan <ThinkPad-Wi-Fi-IPv4>` to start the Windows relay. See
+`bash start.sh --help` for overrides.
+
+
+## Start services individually
 
 In WSL, from the repository root, install the simulator dependencies into
 your Python environment and start FastAPI. Use the Quartus path installed

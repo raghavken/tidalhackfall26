@@ -42,6 +42,7 @@ STATIONS = [
     {"station_id": 3, "name": "West", "phase_rad": math.pi + 0.2},
 ]
 STATION_NAMES = [s["name"] for s in STATIONS]
+DEFAULT_PHASES = {s['name']: math.degrees(s['phase_rad']) for s in STATIONS}
 
 # Severity levels. Bands are on the FPGA energy (I^2 + Q^2); for a 0.25 Hz
 # oscillation of amplitude A mHz the energy is about 90,000 * A^2.
@@ -76,6 +77,15 @@ def normalize_severities(config):
             raise ValueError(f"unknown severity {severity!r}; choose from {SEVERITY_NAMES}")
         full[station] = severity
     return full
+
+
+def normalize_phases(phases):
+    values = dict(DEFAULT_PHASES)
+    for name, angle in phases.items():
+        if name not in values or not -360 <= angle <= 360:
+            raise ValueError("phase must be between -360 and 360 degrees for a known station")
+        values[name] = angle
+    return values
 
 
 def _drift_coefficients():
@@ -116,6 +126,8 @@ class LiveSimulator:
         self._fade = [
             {"start": 0.0, "target": 0.0, "from_index": 0} for _ in STATIONS
         ]
+        self.phases = dict(DEFAULT_PHASES)
+        self._phase_fade = [(angle, angle, 0) for angle in self.phases.values()]
         self.history = deque(maxlen=HISTORY_SECONDS * SAMPLE_RATE_HZ)
 
     # -- configuration ------------------------------------------------------
@@ -126,6 +138,20 @@ class LiveSimulator:
         progress = min(max((sample_index - fade["from_index"]) / ramp_samples, 0.0), 1.0)
         weight = 0.5 * (1.0 - math.cos(math.pi * progress))
         return fade["start"] + (fade["target"] - fade["start"]) * weight
+
+    def phase_at(self, station_id, sample_index):
+        start, target, origin = self._phase_fade[station_id]
+        progress = min(max((sample_index - origin) / (RAMP_SECONDS * SAMPLE_RATE_HZ), 0), 1)
+        delta = (target - start + 180) % 360 - 180
+        return start + delta * (1 - math.cos(math.pi * progress)) / 2
+
+    def set_phases(self, phases):
+        new = normalize_phases(phases)
+        for sid, name in enumerate(STATION_NAMES):
+            if new[name] != self.phases[name]:
+                self._phase_fade[sid] = (self.phase_at(sid, self.sample_index),
+                                         new[name], self.sample_index)
+        self.phases = new
 
     def set_severities(self, config):
         """Replace the whole configuration. Changed stations fade to the new level."""
@@ -152,7 +178,7 @@ class LiveSimulator:
         for station in STATIONS:
             sid = station["station_id"]
             osc = self.amplitude_at(sid, n) * math.sin(
-                2.0 * math.pi * OSC_FREQUENCY_HZ * t + station["phase_rad"]
+                2.0 * math.pi * OSC_FREQUENCY_HZ * t + math.radians(self.phase_at(sid, n))
             )
             deviations.append(self._drift + noise[sid] + osc)
         sample = _make_sample(n, t, deviations)
@@ -167,13 +193,14 @@ class LiveSimulator:
         return list(self.history)[-num_samples:]
 
 
-def generate_window(severities, rng, num_samples=WINDOW_SAMPLES):
+def generate_window(severities, rng, num_samples=WINDOW_SAMPLES, *, phases=None):
     """
     A fresh, independent window for Diagnose: full-strength oscillation from
     the first sample, new drift and noise, and a random common starting phase
     (station offsets preserved). Sample indices start at 0.
     """
     config = normalize_severities(severities)
+    angles = normalize_phases(phases or {})
     phi, innovation_std = _drift_coefficients()
     drift = rng.normal(0.0, DRIFT_STD_MHZ)
     start_phase = rng.uniform(0.0, 2.0 * math.pi)
@@ -185,7 +212,7 @@ def generate_window(severities, rng, num_samples=WINDOW_SAMPLES):
         noise = rng.normal(0.0, NOISE_STD_MHZ, len(STATIONS))
         deviations = [
             drift + noise[s["station_id"]] + amplitudes[s["station_id"]] * math.sin(
-                2.0 * math.pi * OSC_FREQUENCY_HZ * t + start_phase + s["phase_rad"])
+                2.0 * math.pi * OSC_FREQUENCY_HZ * t + start_phase + math.radians(angles[s["name"]]))
             for s in STATIONS
         ]
         window.append(_make_sample(n, t, deviations))
