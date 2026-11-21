@@ -4,9 +4,47 @@ Verilog-2001 implementation for the **original Terasic DE1, Cyclone II**.
 All project files and generated outputs stay under `fpga/`. The existing
 simulator and its seven-byte protocol are unchanged.
 
+## Architecture
+
+```mermaid
+flowchart LR
+    A["Simulator dataset"] --> B["Windows quartus_stp and replay Tcl"]
+    B <-->|USB-Blaster / Virtual JTAG| C["DE1 JTAG mailbox"]
+    C --> D["Packet parser → station demux → correlator"]
+    D --> E["Result FIFO and formatter"]
+    E --> C
+    F["WSL dashboard server"] -->|launches replay| B
+    B -->|acknowledgments and raw replies| F
+    A --> G["Python reference detector"]
+    G -->|expected results| F
+    F --> H["Browser dashboard"]
+```
+
+The DE1 Quartus project enables `DE1_VIRTUAL_JTAG`. The Windows
+`quartus_stp` process runs `tools/jtag_replay.tcl` through the same
+USB-Blaster connection used to program the FPGA.
+
+- `rtl/jtag_transport.v` instantiates Altera's `sld_virtual_jtag` IP.
+  Its 128-bit scans carry reset, measurement, and result-consume commands
+  and return mailbox status and raw result bytes.
+- Synchronized request and acknowledgment signals pass each seven-byte
+  measurement from the JTAG clock to the 50 MHz FPGA clock. The mailbox
+  acknowledges after supplying all seven bytes to the parser.
+- The parser checks packet fields and checksum, and the station demultiplexer
+  enforces sample order. The correlator computes 0.25 Hz energy and alarms
+  over 600 samples per station.
+- The result FIFO and formatter feed 14-byte packets to the mailbox, which
+  holds one complete reply until the host consumes it. The host drains four
+  station results after every 2,400 measurements.
+- The dashboard reads replay progress and hardware replies, checks packet
+  fields and checksum, and compares each decoded result with the independent
+  Python reference.
+
+
 ## Verification status
 
-Verified with Icarus Verilog/vvp on Apple Silicon macOS:
+The full Icarus Verilog regression suite passed in WSL. The Virtual JTAG
+integration bench matched all 12 replies for the grid oscillation dataset.
 
 - UART RX/TX, parser, station routing, UART echo and reset/error handling.
 - Single-station and four-station integer correlation, including signed limits,
@@ -19,7 +57,11 @@ Verified with Icarus Verilog/vvp on Apple Silicon macOS:
   against a simulated serial peer with fragmented reads and short writes.
 - Existing simulator suite: 18 tests passed, run without changing its files.
 
-Quartus II 13.0 SP1 synthesis, fitting, 50 MHz timing and USB-Blaster configuration have also been checked on Windows.
+Quartus II 13.0 SP1 compiled and programmed the Virtual JTAG build on Windows.
+TimeQuest reported 1.532 ns of worst-case setup slack at 50 MHz. The physical
+DE1 acknowledged all 8,400 grid oscillation measurements and returned 12
+checksum-valid packets. All 12 matched the Python reference exactly. The normal
+and isolated datasets were verified in RTL simulation.
 
 ## Run tests on macOS
 
@@ -41,7 +83,8 @@ make test-integration
 returns a nonzero exit code; successful stages print `PASS`. No GTKWave or
 Quartus installation is needed. The numerical reference and vector tools use
 only Python's standard library. `make PYTHON=python3 test` also works without a
-venv. `pyserial` is required for physical replay. NumPy/pytest are included for
+venv. `pyserial` supports the legacy serial replay tool. The JTAG dashboard uses
+only the Python standard library. NumPy/pytest are included for
 working alongside the simulator. Its CLI plot tests also require matplotlib.
 
 Additional targets: `test-echo`, `test-formatter`, `test-faults`, `test-tools`,
@@ -53,7 +96,7 @@ with all four stations, including consecutive-clock inputs. `make
 test-integration` injects decoded UART bytes at the parser for all 58,800 bytes
 of each dataset; it still checks output using an independently instantiated
 UART receiver. It then exercises the serial input itself on a smaller dataset
-prefix. UART benches use 16 clocks/bit to reduce run time; production uses
+prefix. UART benches use 16 clocks/bit to reduce run time. The standalone UART RTL defaults to
 434 clocks/bit (50 MHz / 115200, rounded).
 
 ## Simulator contract checked before implementation
@@ -95,8 +138,8 @@ window cannot be distinguished from a stopped replay by the FPGA protocol.
 
 ## RTL design
 
-`top.v` connects UART RX → packet parser → station demux → correlator → result
-FIFO/formatter → UART TX. Echo mode uses the same parser and output FIFO.
+`top.v` connects the Virtual JTAG transport to the parser and formatter in the
+board build. The legacy UART benches exercise UART RX/TX and echo mode.
 
 - RX has a two-flop synchronizer, midpoint start validation, eight LSB-first
   data samples, stop validation and a one-cycle valid/error pulse. Invalid stop
@@ -125,17 +168,14 @@ FIFO/formatter → UART TX. Echo mode uses the same parser and output FIFO.
 - Windows are non-overlapping: end indices 599, 1199, 1799, etc. The last
   300 samples of a default dataset do not publish a result.
 - The output FIFO holds eight pending packets plus the active packet. Its
-  ready/valid byte interface stalls safely while UART TX is busy. Overflow
+  ready/valid byte interface stalls safely when the transport applies backpressure. Overflow
   latches a fatal stream error rather than silently accepting lost results.
   This depth covers four station completions even in the fast parser tests.
 
-Packet, UART, timeout, ordering and queue errors latch until KEY0 reset. They
-invalidate published alarms and window-valid LEDs and flush pending packets.
-A byte already accepted by the UART transmitter may finish; an incomplete
-output packet may therefore remain in a failed capture. Discard the failed
-run, reset and restart from sample zero. All counters and detector state clear
-on reset. Header-search garbage is ignored until `AA`; framing/checksum errors
-and subsequent ordering checks provide error detection, not correction.
+Packet, timeout, ordering and queue errors latch until KEY0 or a JTAG reset.
+They invalidate published alarms and window-valid LEDs and flush pending
+formatter data. The host checks the JTAG error status and stops replay on a
+latched error. A new replay resets detector state and starts at sample zero.
 
 ## Dataset measurements
 
@@ -176,10 +216,7 @@ The assignments were checked against the original **DE1 User Manual**:
 [manufacturer download](https://www.terasic.com.tw/attachment/archive/83/DE1_UserManual_v1018.pdf)
 and [accessible mirror of the Altera-authored manual](https://dl.btc.pl/kamami_wa/terasic_de1_de1_usermanual_v1018.pdf),
 tables 4.1–4.3 (printed pp. 28–29), 4.5 (p. 32) and 4.10 (p. 39).
-The manual identifies the Cyclone II 2C20 / 484-pin family/package. The requested
-**EP2C20F484C7** is selected in `quartus/de1.qsf`; no pre-existing working
-Quartus project or physical board was available to cross-check its speed grade.
-Check the actual chip marking before programming. These are not DE1-SoC pins.
+The manual identifies the Cyclone II 2C20 / 484-pin family/package. The Quartus project selects **EP2C20F484C7** in `quartus/de1.qsf`.
 
 | Top port | Board resource | FPGA pin |
 |---|---|---|
@@ -188,7 +225,7 @@ Check the actual chip marking before programming. These are not DE1-SoC pins.
 | LEDR[0:3] | North/East/South/West alarms | R20/R19/U19/Y19 |
 | LEDR[4] | Latched packet/stream/queue error | T18 |
 | LEDR[5] | At least one published window, valid | V19 |
-| LEDG[0] / [1] | RX packet / TX activity, stretched 100 ms | U22/U21 |
+| LEDG[0] / [1] | Measurement / result activity, stretched 100 ms | U22/U21 |
 | LEDG[7] | 1 Hz heartbeat | Y21 |
 
 LEDG[2:6] are off and assigned to their original DE1 pins. KEY0 resets the detector. The JTAG host also resets it before each replay.
