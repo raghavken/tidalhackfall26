@@ -1,29 +1,27 @@
-"""Synthetic PMU data generator for the Oscillation Cartographer project."""
+"""Live PMU simulator for Oscillation Cartographer (FastAPI + WebSocket)."""
 
-from .packet_encoder import (
-    PACKET_SIZE,
-    decode_packet,
-    decode_stream,
-    encode_packet,
-    encode_records,
-)
-from .scenarios import (
+from .diagnose import evidence_only, run_diagnosis
+from .live_sim import (
     SAMPLE_RATE_HZ,
-    SCENARIOS,
+    SEVERITIES,
+    STATION_NAMES,
     STATIONS,
-    generate_data,
-    generate_frequencies,
+    LiveSimulator,
+    generate_window,
+    severity_from_energy,
 )
+from .packet_encoder import decode_stream, encode_packet
 
 __all__ = [
-    "PACKET_SIZE",
     "SAMPLE_RATE_HZ",
-    "SCENARIOS",
+    "SEVERITIES",
+    "STATION_NAMES",
     "STATIONS",
-    "decode_packet",
+    "LiveSimulator",
     "decode_stream",
     "encode_packet",
-    "encode_records",
-    "generate_data",
-    "generate_frequencies",
+    "evidence_only",
+    "generate_window",
+    "run_diagnosis",
+    "severity_from_energy",
 ]

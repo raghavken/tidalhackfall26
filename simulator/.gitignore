@@ -1,0 +1,4 @@
+# Python bytecode and caches (recreated automatically when code runs)
+__pycache__/
+*.pyc
+.pytest_cache/
