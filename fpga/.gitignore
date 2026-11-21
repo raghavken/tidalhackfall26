@@ -1,0 +1,15 @@
+.venv/
+__pycache__/
+.pytest_cache/
+build/
+*.vcd
+*.fst
+quartus/db/
+quartus/incremental_db/
+quartus/output_files/
+quartus/*.qws
+quartus/*.rpt
+quartus/*.summary
+quartus/*.smsg
+quartus/*.sof
+quartus/*.pof
