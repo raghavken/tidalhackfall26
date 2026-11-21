@@ -245,7 +245,14 @@ quartus_pgm --% -c 1 -m JTAG -o "P;output_files\de1.sof@1"
 Use `quartus_pgm -l` to confirm the cable number. This loads FPGA SRAM.
 Reprogram the board after a power cycle.
 
-## Live hardware dashboard
+## Live simulator and Next.js dashboard
+
+The [Next.js dashboard](../frontend/README.md) controls the live simulator on
+the ThinkPad. In hardware mode, Diagnose sends a fresh window through the same
+Windows Quartus replay used by the frozen-data tools. The browser can run on
+another computer on the same Wi-Fi while USB-Blaster stays on the ThinkPad.
+
+## Frozen dataset hardware dashboard
 
 In WSL, from the repository root:
 

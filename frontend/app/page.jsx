@@ -69,6 +69,7 @@ export default function Page() {
   const [samples, setSamples] = useState([]);
   const [draft, setDraft] = useState(null);
   const [diagnosis, setDiagnosis] = useState(null);
+  const [explanations, setExplanations] = useState({});
   const [busy, setBusy] = useState('');
   const [error, setError] = useState('');
 
@@ -124,8 +125,14 @@ export default function Page() {
     setDraft(null);
   });
 
+  const explain = () => control('Asking Nemotron', async () => {
+    const result = await api('diagnoses/' + diagnosis.diagnosis_id + '/explain', {method:'POST'});
+    setExplanations(previous => ({...previous, [result.diagnosis_id]: result}));
+  });
+
   const stations = config?.stations || [];
   const latest = samples.at(-1);
+  const explanation = explanations[diagnosis?.diagnosis_id];
   const values = draft || state;
   const disabled = status !== 'Connected' || Boolean(busy);
   return <main>
@@ -162,6 +169,13 @@ export default function Page() {
       <div className="table"><table><thead><tr><th>Station</th><th>Energy</th><th>Severity</th><th>Alarm</th></tr></thead>
         <tbody>{diagnosis.fpga_results.map(row => <tr key={row.station_id}><td>{row.station}</td><td>{row.energy.toLocaleString()}</td><td>{row.severity}</td><td>{row.alarm ? 'On' : 'Off'}</td></tr>)}</tbody></table></div>
       {diagnosis.analysis.phase_relationships.map(pair => <p key={pair.stations.join('-')}>{pair.stations.join(' and ')} · {pair.relationship.replace('_', ' ')} · {Math.round(pair.phase_difference_rad * 180 / Math.PI)}°</p>)}
+      <div className="actions">
+        <button disabled={disabled} onClick={explain}>Explain with Nemotron</button>
+        {busy === 'Asking Nemotron' && <span role="status">Analyzing this diagnosis…</span>}
+      </div>
+      {explanation && <div aria-live="polite"><h3>Nemotron analysis</h3>
+        <p style={{whiteSpace:'pre-wrap'}}>{explanation.analysis}</p>
+      </div>}
     </section>}
   </main>;
 }

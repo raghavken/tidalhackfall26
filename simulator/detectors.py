@@ -4,10 +4,13 @@ FPGA's per-station results.
 
 - "reference": fpga/tools/reference_detector.py, the FPGA team's bit-exact
   Python model of the board. No hardware needed.
-- "hardware": the real DE1 over JTAG. Not wired up yet.
+- "hardware": the real DE1 over JTAG. Uses the configured Windows Quartus tool.
 """
 
 import os
+from pathlib import Path
+import subprocess
+from tempfile import TemporaryDirectory
 import sys
 
 from .packet_encoder import decode_stream
@@ -49,8 +52,36 @@ class HardwareDetector:
     name = "hardware"
 
     def detect(self, packet_bytes):
-        raise DetectorUnavailable(
-            "hardware detector not configured yet; use the 'reference' detector")
+        quartus = os.environ.get("SIM_QUARTUS_STP")
+        if not quartus:
+            raise DetectorUnavailable("hardware detector not configured; set SIM_QUARTUS_STP")
+        if _FPGA_TOOLS not in sys.path:
+            sys.path.insert(0, _FPGA_TOOLS)
+        from decode_results import decode_packet
+        from jtag_host import hardware_events
+
+        results = []
+        complete = None
+        try:
+            with TemporaryDirectory(prefix="simulator-window-") as directory:
+                source = Path(directory) / "diagnosis.bin"
+                source.write_bytes(packet_bytes)
+                for line in hardware_events(quartus, source):
+                    kind, _, payload = line.partition(" ")
+                    if kind == "RECEIVED":
+                        results.append(decode_packet(bytes.fromhex(payload)))
+                    elif kind == "COMPLETE":
+                        complete = int(payload)
+                    elif kind == "ERROR":
+                        raise RuntimeError(payload)
+            expected = [(station, index) for index in range(599, len(packet_bytes) // 28, 600)
+                        for station in range(4)]
+            actual = [(r["station_id"], r["window_end_sample"]) for r in results]
+            if complete != len(packet_bytes) // 7 or actual != expected:
+                raise RuntimeError("FPGA measurement count or result identities did not match")
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            raise DetectorUnavailable(f"USB-Blaster replay failed: {exc}") from exc
+        return results
 
 
 DETECTORS = {"reference": ReferenceDetector, "hardware": HardwareDetector}

@@ -71,13 +71,13 @@ def analyze(window, fpga_results):
     }
 
 
-def run_diagnosis(severities, rng, detector, diagnosis_id=0):
+def run_diagnosis(severities, rng, detector, diagnosis_id=0, *, phases=None):
     """
     Full Diagnose pipeline. Returns (diagnosis_dict, window).
     `rng` should be a long-lived generator so each call draws fresh noise.
     """
     requested = normalize_severities(severities)
-    window = generate_window(requested, rng, WINDOW_SAMPLES)
+    window = generate_window(requested, rng, WINDOW_SAMPLES, phases=phases)
     packets = window_to_packets(window)
     raw = detector.detect(packets)
     if len(raw) != len(STATION_NAMES):

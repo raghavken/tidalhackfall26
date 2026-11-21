@@ -17,16 +17,17 @@ import threading
 import time
 from collections import deque
 from contextlib import asynccontextmanager
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from .detectors import DetectorUnavailable, get_detector
 from .diagnose import run_diagnosis
+from .nemotron import ModelUnavailable, explain_diagnosis
 from .live_sim import (
     ENERGY_THRESHOLD,
     OSC_FREQUENCY_HZ,
@@ -53,8 +54,11 @@ class AnomalyRequest(BaseModel):
     South: Optional[Severity] = None
     West: Optional[Severity] = None
 
+    phase_deg: Optional[dict[Literal["North", "East", "South", "West"],
+                             Annotated[float, Field(ge=-360, le=360)]]] = None
+
     def as_config(self):
-        return {k: v for k, v in self.model_dump().items() if v is not None}
+        return {k: v for k, v in self.model_dump(exclude={"phase_deg"}).items() if v is not None}
 
 
 class ResetRequest(BaseModel):
@@ -107,6 +111,7 @@ class Hub:
             "sample_index": self.sim.sample_index,
             "time_seconds": round(self.sim.sample_index / SAMPLE_RATE_HZ, 3),
             "severities": dict(self.sim.severities),
+            "phase_deg": dict(self.sim.phases),
             "seed": self.sim.seed,
             "clients": len(self.clients),
         }
@@ -140,24 +145,28 @@ class Hub:
             deadline = max(deadline + period, time.monotonic())
 
     # -- actions ------------------------------------------------------------
-    def set_severities(self, config):
+    def set_severities(self, config, phases=None):
         self.sim.set_severities(config)
+        if phases is not None:
+            self.sim.set_phases(phases)
         self.broadcast({"type": "state", "state": self.state()})
 
     def reset(self, seed):
         severities = self.sim.severities
+        phases = self.sim.phases
         self.sim = LiveSimulator(seed)
         self.sim.set_severities(severities)
+        self.sim.set_phases(phases)
         self._pending = []
         self.broadcast({"type": "reset", "state": self.state()})
 
-    def diagnose(self, severities):
+    def diagnose(self, severities, phases):
         """Runs in a worker thread (CPU work must not block the stream)."""
         with self._diagnose_lock:
             diagnosis_id = self.next_diagnosis_id
             self.next_diagnosis_id += 1
             return run_diagnosis(severities, self._diagnose_rng,
-                                 get_detector(self.detector_name), diagnosis_id)
+                                 get_detector(self.detector_name), diagnosis_id, phases=phases)
 
 
 def _force_close(queue):
@@ -207,12 +216,12 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
 
     @app.put("/api/anomaly")
     async def put_anomaly(request: AnomalyRequest):
-        hub.set_severities(request.as_config())
+        hub.set_severities(request.as_config(), request.phase_deg)
         return hub.state()
 
     @app.delete("/api/anomaly")
     async def clear_anomaly():
-        hub.set_severities({})
+        hub.set_severities({}, {})
         return hub.state()
 
     @app.post("/api/stream/pause")
@@ -236,7 +245,7 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
     async def diagnose():
         severities = dict(hub.sim.severities)
         try:
-            diagnosis, window = await run_in_threadpool(hub.diagnose, severities)
+            diagnosis, window = await run_in_threadpool(hub.diagnose, severities, dict(hub.sim.phases))
         except DetectorUnavailable as exc:
             raise HTTPException(status_code=503, detail=str(exc))
         hub.diagnoses.append(diagnosis)
@@ -246,6 +255,17 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
     @app.get("/api/diagnoses")
     async def list_diagnoses():
         return list(hub.diagnoses)
+
+    @app.post("/api/diagnoses/{diagnosis_id}/explain")
+    async def explain(diagnosis_id: int):
+        diagnosis = next((record for record in hub.diagnoses
+                          if record["diagnosis_id"] == diagnosis_id), None)
+        if diagnosis is None:
+            raise HTTPException(status_code=404, detail="Diagnosis is no longer available.")
+        try:
+            return await explain_diagnosis(diagnosis, hub.config())
+        except ModelUnavailable as exc:
+            raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
 
     # -- WebSocket ------------------------------------------------------------
     @app.websocket("/ws/stream")
