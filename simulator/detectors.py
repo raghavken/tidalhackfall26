@@ -60,14 +60,3 @@ def get_detector(name):
     if name not in DETECTORS:
         raise ValueError(f"unknown detector {name!r}; choose from {list(DETECTORS)}")
     return DETECTORS[name]()
-
-
-def detector_available(name):
-    """True if the named detector can run right now (for the status endpoint)."""
-    if name == "hardware":
-        return False  # stub until the JTAG path is wired in
-    try:
-        _import_reference_detector()
-    except DetectorUnavailable:
-        return False
-    return True

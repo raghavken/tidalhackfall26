@@ -23,15 +23,16 @@ import numpy as np
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict
 
-from .detectors import DetectorUnavailable, detector_available, get_detector
+from .detectors import DetectorUnavailable, get_detector
 from .diagnose import run_diagnosis
 from .live_sim import (
     ENERGY_THRESHOLD,
     OSC_FREQUENCY_HZ,
     SAMPLE_RATE_HZ,
     SEVERITIES,
+    STATION_NAMES,
     STATIONS,
     WINDOW_SAMPLES,
     LiveSimulator,
@@ -42,32 +43,18 @@ MAX_DIAGNOSES = 20
 CLIENT_QUEUE_SIZE = 300  # messages; a client this far behind is disconnected
 
 Severity = Literal["normal", "mild", "moderate", "severe"]
-Phase = Optional[float]
-
-
-class PhaseRequest(BaseModel):
-    """Per-station phase in degrees (-360..360). Omitted stations keep their phase."""
-    model_config = ConfigDict(extra="forbid")
-    North: Phase = Field(default=None, ge=-360, le=360)
-    East: Phase = Field(default=None, ge=-360, le=360)
-    South: Phase = Field(default=None, ge=-360, le=360)
-    West: Phase = Field(default=None, ge=-360, le=360)
-
-    def as_config(self):
-        return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
 class AnomalyRequest(BaseModel):
-    """Per-station severity (omitted = normal) plus optional phase changes."""
+    """Per-station severity. Omitted stations are 'normal'. Unknown keys -> 422."""
     model_config = ConfigDict(extra="forbid")
     North: Optional[Severity] = None
     East: Optional[Severity] = None
     South: Optional[Severity] = None
     West: Optional[Severity] = None
-    phase_deg: Optional[PhaseRequest] = None
 
-    def severities(self):
-        return {k: v for k, v in self.model_dump(exclude={"phase_deg"}).items() if v is not None}
+    def as_config(self):
+        return {k: v for k, v in self.model_dump().items() if v is not None}
 
 
 class ResetRequest(BaseModel):
@@ -81,7 +68,7 @@ def _env_int(name, default):
 
 
 class Hub:
-    """Shared server state: the simulator, connected clients, diagnoses, status."""
+    """Shared server state: the simulator, connected clients and diagnoses."""
 
     def __init__(self, seed, batch, detector_name, speed):
         if batch < 1:
@@ -100,8 +87,6 @@ class Hub:
         self._diagnose_rng = np.random.default_rng()  # fresh noise on every press
         self._diagnose_lock = threading.Lock()
         self._pending = []
-        self.fpga = {"state": "idle", "last_diagnosis_id": None,
-                     "last_run_ms": None, "last_error": None}
 
     # -- messages -----------------------------------------------------------
     def config(self):
@@ -122,18 +107,8 @@ class Hub:
             "sample_index": self.sim.sample_index,
             "time_seconds": round(self.sim.sample_index / SAMPLE_RATE_HZ, 3),
             "severities": dict(self.sim.severities),
-            "phase_deg": dict(self.sim.phase_deg),
             "seed": self.sim.seed,
             "clients": len(self.clients),
-        }
-
-    def status(self):
-        return {
-            "stream": {"running": not self.paused, "clients": len(self.clients),
-                       "sample_index": self.sim.sample_index},
-            "fpga": {"detector": self.detector_name,
-                     "available": detector_available(self.detector_name), **self.fpga},
-            "nemotron": {"state": "not_connected", "detail": "Agent not built yet"},
         }
 
     def broadcast(self, message):
@@ -143,9 +118,6 @@ class Hub:
             except asyncio.QueueFull:  # client too slow: drop it
                 self.clients.discard(queue)
                 _force_close(queue)
-
-    def broadcast_status(self):
-        self.broadcast({"type": "status", "status": self.status()})
 
     # -- generator loop -----------------------------------------------------
     def tick(self):
@@ -168,32 +140,24 @@ class Hub:
             deadline = max(deadline + period, time.monotonic())
 
     # -- actions ------------------------------------------------------------
-    def set_anomaly(self, severities, phase_deg):
-        self.sim.set_severities(severities)
-        if phase_deg:
-            self.sim.set_phases(phase_deg)
+    def set_severities(self, config):
+        self.sim.set_severities(config)
         self.broadcast({"type": "state", "state": self.state()})
-
-    def set_paused(self, paused):
-        self.paused = paused
-        self.broadcast({"type": "state", "state": self.state()})
-        self.broadcast_status()
 
     def reset(self, seed):
-        severities, phases = self.sim.severities, self.sim.phase_deg
+        severities = self.sim.severities
         self.sim = LiveSimulator(seed)
         self.sim.set_severities(severities)
-        self.sim.set_phases(phases)
         self._pending = []
         self.broadcast({"type": "reset", "state": self.state()})
 
-    def diagnose(self, severities, phase_deg):
+    def diagnose(self, severities):
         """Runs in a worker thread (CPU work must not block the stream)."""
         with self._diagnose_lock:
             diagnosis_id = self.next_diagnosis_id
             self.next_diagnosis_id += 1
             return run_diagnosis(severities, self._diagnose_rng,
-                                 get_detector(self.detector_name), diagnosis_id, phase_deg)
+                                 get_detector(self.detector_name), diagnosis_id)
 
 
 def _force_close(queue):
@@ -241,29 +205,26 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
     async def get_state():
         return hub.state()
 
-    @app.get("/api/status")
-    async def get_status():
-        return hub.status()
-
     @app.put("/api/anomaly")
     async def put_anomaly(request: AnomalyRequest):
-        phases = request.phase_deg.as_config() if request.phase_deg else None
-        hub.set_anomaly(request.severities(), phases)
+        hub.set_severities(request.as_config())
         return hub.state()
 
     @app.delete("/api/anomaly")
     async def clear_anomaly():
-        hub.set_anomaly({}, None)
+        hub.set_severities({})
         return hub.state()
 
     @app.post("/api/stream/pause")
     async def pause():
-        hub.set_paused(True)
+        hub.paused = True
+        hub.broadcast({"type": "state", "state": hub.state()})
         return hub.state()
 
     @app.post("/api/stream/resume")
     async def resume():
-        hub.set_paused(False)
+        hub.paused = False
+        hub.broadcast({"type": "state", "state": hub.state()})
         return hub.state()
 
     @app.post("/api/stream/reset")
@@ -273,29 +234,13 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
 
     @app.post("/api/diagnose")
     async def diagnose():
-        if hub.fpga["state"] == "diagnosing":
-            raise HTTPException(status_code=409, detail="A diagnosis is already running")
-        severities, phases = dict(hub.sim.severities), dict(hub.sim.phase_deg)
-        hub.fpga.update(state="diagnosing", last_error=None)
-        hub.broadcast_status()
-        started = time.perf_counter()
+        severities = dict(hub.sim.severities)
         try:
-            diagnosis, window = await run_in_threadpool(hub.diagnose, severities, phases)
+            diagnosis, window = await run_in_threadpool(hub.diagnose, severities)
         except DetectorUnavailable as exc:
-            hub.fpga.update(state="error", last_error=str(exc))
-            hub.broadcast_status()
             raise HTTPException(status_code=503, detail=str(exc))
-        except Exception as exc:
-            hub.fpga.update(state="error", last_error=str(exc))
-            hub.broadcast_status()
-            raise
-        elapsed_ms = round((time.perf_counter() - started) * 1000)
-        diagnosis["run_ms"] = elapsed_ms
-        hub.fpga.update(state="idle", last_diagnosis_id=diagnosis["diagnosis_id"],
-                        last_run_ms=elapsed_ms)
         hub.diagnoses.append(diagnosis)
         hub.broadcast({"type": "diagnosis", "diagnosis": diagnosis, "window": window})
-        hub.broadcast_status()
         return diagnosis
 
     @app.get("/api/diagnoses")
@@ -309,7 +254,6 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
         queue = asyncio.Queue(maxsize=CLIENT_QUEUE_SIZE)
         hub.clients.add(queue)
         await ws.send_json({"type": "hello", "config": hub.config(), "state": hub.state(),
-                            "status": hub.status(),
                             "history": hub.sim.recent(HELLO_HISTORY_SAMPLES)})
 
         async def sender():

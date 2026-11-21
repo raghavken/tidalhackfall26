@@ -71,14 +71,12 @@ CORS allows any `http://localhost:<port>` or `http://127.0.0.1:<port>` origin, s
 
 ## Stations and severity
 
-| Station | ID | Default phase |
+| Station | ID | Phase |
 |---|---|---|
-| North | 0 | 0° |
-| East | 1 | 8.59° (0.15 rad, moves with North) |
-| South | 2 | 180° (π, moves opposite North) |
-| West | 3 | 191.46° (π + 0.2 rad, moves with South) |
-
-**Phase is user-settable per station** with `phase_deg` (degrees, −360 to 360). For example, setting South to 0° makes North and South swing together. A phase change slides to the new value over the same 4 s ramp as severity, along the shortest way round, so the signal never jumps. Diagnose uses the current phases.
+| North | 0 | 0 |
+| East | 1 | 0.15 rad (moves with North) |
+| South | 2 | π (moves opposite North) |
+| West | 3 | π + 0.2 rad (moves with South) |
 
 Each station is set independently to one of four severities. Severity bands are defined on the FPGA's energy, `I² + Q²`, which is about 90,000 × A² for an oscillation of amplitude A mHz. The FPGA alarm threshold of 2,250,000 corresponds to 5 mHz.
 
@@ -100,7 +98,7 @@ f_k(t) = 60 Hz + [ d(t) + n_k(t) + A_k(t) · sin(2π · 0.25 · t + φ_k) ] / 10
 - `d(t)`: shared AR(1) drift, `d[n] = φ·d[n−1] + e[n]`, φ = exp(−Δt/10 s), long-run σ = 3 mHz.
 - `n_k(t)`: independent Gaussian noise per station, σ = 1 mHz.
 - `A_k(t)`: the station's severity amplitude. In the live stream it fades to a new level over 4 s along a raised-cosine curve, starting from the current amplitude, so changes mid-fade don't jump.
-- `φ_k`: the station's phase (defaults in the table above; user-settable with `phase_deg`, sliding over 4 s when changed).
+- `φ_k`: fixed station phase (table above).
 - `frequency_hz` is rounded to 6 decimals, and `deviation_mhz = round((frequency_hz − 60) × 1000)`.
 
 Diagnose windows use the same model at full amplitude from the first sample, with a random common starting phase. The offsets between stations are preserved.
@@ -111,29 +109,13 @@ Diagnose windows use the same model at full amplitude from the first sample, wit
 |---|---|---|
 | `GET /api/health` | — | `{"status": "ok"}` |
 | `GET /api/config` | — | Stations, severities and bands, sample rate, threshold, detector |
-| `GET /api/state` | — | `running`, `sample_index`, `time_seconds`, `severities`, `phase_deg`, `seed`, `clients` |
-| `GET /api/status` | — | Stream, FPGA and Nemotron status (below) |
-| `PUT /api/anomaly` | `{"North": "severe", "South": "mild", "phase_deg": {"South": 0}}` | New state. Severities **replace** the whole configuration (omitted stations become `normal`). `phase_deg` is optional and **merges** (omitted stations keep their phase). Unknown stations or severities, or phases outside −360..360, return `422`. |
+| `GET /api/state` | — | `running`, `sample_index`, `time_seconds`, `severities`, `seed`, `clients` |
+| `PUT /api/anomaly` | `{"North": "severe", "South": "mild"}` | New state. **Replaces** the whole configuration: omitted stations become `normal`. Unknown stations or severities return `422`. |
 | `DELETE /api/anomaly` | — | All stations `normal` |
 | `POST /api/stream/pause` / `resume` | — | State |
-| `POST /api/stream/reset` | optional `{"seed": 42}` | Restarts at sample 0. Severities and phases are kept. |
-| `POST /api/diagnose` | — | Diagnosis (below), including `run_ms`. `503` if the detector is unavailable; `409` if a diagnosis is already running. |
+| `POST /api/stream/reset` | optional `{"seed": 42}` | Restarts at sample 0. Severities are kept. |
+| `POST /api/diagnose` | — | Diagnosis (below). `503` if the detector is unavailable. |
 | `GET /api/diagnoses` | — | The last 20 diagnoses |
-
-### Status (`GET /api/status`, and the `status` WebSocket message)
-
-```json
-{
-  "stream": {"running": true, "clients": 2, "sample_index": 5421},
-  "fpga": {"detector": "reference", "available": true, "state": "idle",
-           "last_diagnosis_id": 3, "last_run_ms": 24, "last_error": null},
-  "nemotron": {"state": "not_connected", "detail": "Agent not built yet"}
-}
-```
-
-- `fpga.state` is `idle`, `diagnosing` (while Diagnose runs) or `error` (the last Diagnose failed; see `last_error`).
-- `fpga.available` is `false` for the `hardware` stub, or if the reference model can't be loaded.
-- `nemotron` is a fixed placeholder until the agent exists. Change `Hub.status()` in `app.py` when it does, and the dashboard pill updates without frontend changes.
 
 ### Diagnosis result
 
@@ -162,8 +144,7 @@ Diagnose windows use the same model at full amplitude from the first sample, wit
 
 - `fpga_results` comes from the detector, exactly what the FPGA reports.
 - `analysis` is computed by the backend from the raw window. A pair of alarmed stations is `in_phase` if their phase difference is within ±π/2, otherwise `opposite`.
-- `requested`, `requested_phase_deg` and `matches_request` are **ground truth** for the demo and tests. Use `simulator.diagnose.evidence_only(diagnosis)` to strip them before anything goes to Nemotron.
-- `run_ms` is how long the detector run took.
+- `requested` and `matches_request` are **ground truth** for the demo and tests. Use `simulator.diagnose.evidence_only(diagnosis)` to strip them before anything goes to Nemotron.
 
 ## WebSocket `/ws/stream`
 
@@ -171,11 +152,10 @@ The server pushes JSON messages; the browser only listens. Controls go through R
 
 | `type` | When | Fields |
 |---|---|---|
-| `hello` | Right after connecting | `config`, `state`, `status`, `history` (up to the last 20 s of samples) |
+| `hello` | Right after connecting | `config`, `state`, `history` (up to the last 20 s of samples) |
 | `samples` | 10× per second | `samples`: list of 3 samples |
 | `state` | Settings changed, paused or resumed | `state` |
 | `reset` | Stream reset | `state` |
-| `status` | Diagnose started, finished or failed; stream paused or resumed | `status` (same as `GET /api/status`) |
 | `diagnosis` | A Diagnose finished | `diagnosis`, `window` (the 600 samples that were diagnosed) |
 
 A sample (arrays are in station order [North, East, South, West]):
@@ -214,12 +194,11 @@ Each measurement is a 7-byte little-endian packet: `AA`, station ID (0–3), sam
 python -m pytest simulator/tests
 ```
 
-The 42 tests cover:
+The 33 tests cover:
 - **Generator:** sample format, reproducibility, fades with no jumps, steady-state amplitudes, configuration validation, the history buffer.
-- **Phase:** defaults, partial updates, validation, a smooth shortest-path slide, the live signal following the phase.
 - **Severity bands:** band edges.
-- **Diagnose:** FPGA input validation, all 256 station/severity combinations, in-phase/opposite detection (including a custom phase), fresh noise per press, ground-truth stripping, the hardware stub.
-- **API:** REST endpoints and errors, `phase_deg`, `/api/status`, WebSocket hello/batching/continuity, identical data for two clients, pushed state/status/diagnosis messages (`diagnosing → idle`), history for late joiners.
+- **Diagnose:** FPGA input validation, all 256 station/severity combinations, in-phase/opposite detection, fresh noise per press, ground-truth stripping, the hardware stub.
+- **API:** REST endpoints and errors, WebSocket hello/batching/continuity, identical data for two clients, pushed state and diagnosis messages, history for late joiners.
 - **Frozen data:** the FPGA data files are unchanged.
 
 Measured against a running server over 60 s: 30.02 samples/s and 10.01 messages/s with contiguous indices. REST calls took ≤ 5 ms and Diagnose 17–47 ms while streaming.
@@ -228,6 +207,7 @@ Measured against a running server over 60 s: 30.02 samples/s and 10.01 messages/
 
 - The `hardware` detector is a stub. Running Diagnose on the real board needs the FPGA team's JTAG replay (`fpga/tools/jtag_replay.tcl`) wired into `detectors.py`.
 - Only 0.25 Hz oscillations; the FPGA detects nothing else.
+- Phase per station is fixed and not user-selectable.
 - Single process, in memory: diagnoses are lost on restart, and all clients share one stream.
 - This is a signal generator, not a power-system simulation.
 - The live `sample_index` grows without limit. That's fine, because Diagnose re-bases its own windows to 0–599 for the FPGA.

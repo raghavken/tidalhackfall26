@@ -13,14 +13,13 @@ from .live_sim import (
     STATION_NAMES,
     WINDOW_SAMPLES,
     generate_window,
-    normalize_phases,
     normalize_severities,
     severity_from_energy,
 )
 from .packet_encoder import encode_packet
 
 # Keys that reveal the answer; removed before anything is sent to Nemotron.
-GROUND_TRUTH_KEYS = ("requested", "requested_phase_deg", "matches_request")
+GROUND_TRUTH_KEYS = ("requested", "matches_request")
 
 
 def window_to_packets(window):
@@ -72,15 +71,13 @@ def analyze(window, fpga_results):
     }
 
 
-def run_diagnosis(severities, rng, detector, diagnosis_id=0, phase_deg=None):
+def run_diagnosis(severities, rng, detector, diagnosis_id=0):
     """
     Full Diagnose pipeline. Returns (diagnosis_dict, window).
     `rng` should be a long-lived generator so each call draws fresh noise.
-    `phase_deg` (optional, partial) overrides the default station phases.
     """
     requested = normalize_severities(severities)
-    phases = normalize_phases(phase_deg)
-    window = generate_window(requested, rng, WINDOW_SAMPLES, phases)
+    window = generate_window(requested, rng, WINDOW_SAMPLES)
     packets = window_to_packets(window)
     raw = detector.detect(packets)
     if len(raw) != len(STATION_NAMES):
@@ -97,7 +94,6 @@ def run_diagnosis(severities, rng, detector, diagnosis_id=0, phase_deg=None):
         "window": {"samples": WINDOW_SAMPLES, "seconds": WINDOW_SAMPLES / SAMPLE_RATE_HZ,
                    "packets": len(packets) // 7},
         "requested": requested,
-        "requested_phase_deg": phases,
         "fpga_results": results,
         "analysis": analyze(window, results),
         "matches_request": all(r["severity"] == requested[r["station"]] for r in results),
