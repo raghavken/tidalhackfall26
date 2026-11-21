@@ -6,7 +6,7 @@
 // badges that pulse with severity and turn red/green after a Diagnose.
 
 import { useEffect, useRef, useState } from 'react';
-import { AttributionControl, Map as MapLibreMap, Marker, NavigationControl, Popup } from 'maplibre-gl';
+import { AttributionControl, Map as MapLibreMap, Marker, NavigationControl, Popup, setWorkerUrl } from 'maplibre-gl';
 import { classifyLines } from '../lib/topology.mjs';
 import { DEFAULT_CENTER, DEFAULT_ZOOM, US_MAX_BOUNDS } from '../lib/overpass.mjs';
 import { VOLTAGE_BANDS, UNKNOWN_VOLTAGE_COLOR, voltageColorExpression, voltageWidthExpression }
@@ -91,6 +91,7 @@ export default function GridMap({ data, assignments, severities, diagnosis, show
       const { style, fallback } = await loadStyle();
       if (cancelled) return;
       setBaseFallback(fallback);
+      setWorkerUrl('/map-worker/maplibre-gl-worker.mjs');
       map = new MapLibreMap({
         container: container.current,
         style,
