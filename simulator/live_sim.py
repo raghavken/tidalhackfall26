@@ -42,6 +42,8 @@ STATIONS = [
     {"station_id": 3, "name": "West", "phase_rad": math.pi + 0.2},
 ]
 STATION_NAMES = [s["name"] for s in STATIONS]
+DEFAULT_PHASE_DEG = {s["name"]: round(math.degrees(s["phase_rad"]), 2) for s in STATIONS}
+PHASE_LIMIT_DEG = 360.0
 
 # Severity levels. Bands are on the FPGA energy (I^2 + Q^2); for a 0.25 Hz
 # oscillation of amplitude A mHz the energy is about 90,000 * A^2.
@@ -78,6 +80,33 @@ def normalize_severities(config):
     return full
 
 
+def normalize_phases(phase_deg, base=None):
+    """
+    Merge a partial {"North": 0, ...} phase update (degrees) into `base`
+    (default: the fixed station phases). Raises ValueError on bad input.
+    """
+    full = dict(base or DEFAULT_PHASE_DEG)
+    for station, value in (phase_deg or {}).items():
+        if station not in full:
+            raise ValueError(f"unknown station {station!r}; choose from {STATION_NAMES}")
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or math.isnan(value):
+            raise ValueError(f"phase for {station} must be a number")
+        if not -PHASE_LIMIT_DEG <= value <= PHASE_LIMIT_DEG:
+            raise ValueError(f"phase for {station} must be between -360 and 360 degrees")
+        full[station] = float(value)
+    return full
+
+
+def _wrap_rad(angle):
+    return (angle + math.pi) % (2 * math.pi) - math.pi
+
+
+def _ramp_weight(sample_index, from_index):
+    ramp_samples = RAMP_SECONDS * SAMPLE_RATE_HZ
+    progress = min(max((sample_index - from_index) / ramp_samples, 0.0), 1.0)
+    return 0.5 * (1.0 - math.cos(math.pi * progress))
+
+
 def _drift_coefficients():
     phi = math.exp(-1.0 / (SAMPLE_RATE_HZ * DRIFT_TIME_CONSTANT_S))
     return phi, DRIFT_STD_MHZ * math.sqrt(1.0 - phi * phi)
@@ -112,9 +141,14 @@ class LiveSimulator:
         self._drift = self.rng.normal(0.0, DRIFT_STD_MHZ)  # start in steady state
         self.sample_index = 0
         self.severities = {name: "normal" for name in STATION_NAMES}
-        # Per-station fade: amplitude goes from `start` to `target` over the ramp.
+        self.phase_deg = dict(DEFAULT_PHASE_DEG)
+        # Per-station fades: amplitude and phase each move from `start` to
+        # `target` over the ramp, so changes never jump.
         self._fade = [
             {"start": 0.0, "target": 0.0, "from_index": 0} for _ in STATIONS
+        ]
+        self._phase_fade = [
+            {"start": s["phase_rad"], "delta": 0.0, "from_index": 0} for s in STATIONS
         ]
         self.history = deque(maxlen=HISTORY_SECONDS * SAMPLE_RATE_HZ)
 
@@ -122,10 +156,29 @@ class LiveSimulator:
     def amplitude_at(self, station_id, sample_index):
         """Oscillation amplitude (mHz) for a station at a given sample."""
         fade = self._fade[station_id]
-        ramp_samples = RAMP_SECONDS * SAMPLE_RATE_HZ
-        progress = min(max((sample_index - fade["from_index"]) / ramp_samples, 0.0), 1.0)
-        weight = 0.5 * (1.0 - math.cos(math.pi * progress))
+        weight = _ramp_weight(sample_index, fade["from_index"])
         return fade["start"] + (fade["target"] - fade["start"]) * weight
+
+    def phase_at(self, station_id, sample_index):
+        """Station phase (radians) at a given sample; slides along the shortest way."""
+        fade = self._phase_fade[station_id]
+        return fade["start"] + fade["delta"] * _ramp_weight(sample_index, fade["from_index"])
+
+    def set_phases(self, phase_deg):
+        """Merge a partial phase update (degrees). Changed stations slide over the ramp."""
+        new = normalize_phases(phase_deg, self.phase_deg)
+        for station in STATIONS:
+            sid, name = station["station_id"], station["name"]
+            if new[name] != self.phase_deg[name]:
+                current = self.phase_at(sid, self.sample_index)
+                target = math.radians(new[name])
+                self._phase_fade[sid] = {
+                    "start": current,
+                    "delta": _wrap_rad(target - current),
+                    "from_index": self.sample_index,
+                }
+        self.phase_deg = new
+        return dict(new)
 
     def set_severities(self, config):
         """Replace the whole configuration. Changed stations fade to the new level."""
@@ -152,7 +205,7 @@ class LiveSimulator:
         for station in STATIONS:
             sid = station["station_id"]
             osc = self.amplitude_at(sid, n) * math.sin(
-                2.0 * math.pi * OSC_FREQUENCY_HZ * t + station["phase_rad"]
+                2.0 * math.pi * OSC_FREQUENCY_HZ * t + self.phase_at(sid, n)
             )
             deviations.append(self._drift + noise[sid] + osc)
         sample = _make_sample(n, t, deviations)
@@ -167,17 +220,19 @@ class LiveSimulator:
         return list(self.history)[-num_samples:]
 
 
-def generate_window(severities, rng, num_samples=WINDOW_SAMPLES):
+def generate_window(severities, rng, num_samples=WINDOW_SAMPLES, phase_deg=None):
     """
     A fresh, independent window for Diagnose: full-strength oscillation from
     the first sample, new drift and noise, and a random common starting phase
-    (station offsets preserved). Sample indices start at 0.
+    (station offsets from `phase_deg` preserved). Sample indices start at 0.
     """
     config = normalize_severities(severities)
+    phases = normalize_phases(phase_deg)
     phi, innovation_std = _drift_coefficients()
     drift = rng.normal(0.0, DRIFT_STD_MHZ)
     start_phase = rng.uniform(0.0, 2.0 * math.pi)
     amplitudes = [SEVERITIES[config[s["name"]]]["amplitude_mhz"] for s in STATIONS]
+    offsets = [math.radians(phases[s["name"]]) for s in STATIONS]
     window = []
     for n in range(num_samples):
         t = n / SAMPLE_RATE_HZ
@@ -185,7 +240,7 @@ def generate_window(severities, rng, num_samples=WINDOW_SAMPLES):
         noise = rng.normal(0.0, NOISE_STD_MHZ, len(STATIONS))
         deviations = [
             drift + noise[s["station_id"]] + amplitudes[s["station_id"]] * math.sin(
-                2.0 * math.pi * OSC_FREQUENCY_HZ * t + start_phase + s["phase_rad"])
+                2.0 * math.pi * OSC_FREQUENCY_HZ * t + start_phase + offsets[s["station_id"]])
             for s in STATIONS
         ]
         window.append(_make_sample(n, t, deviations))

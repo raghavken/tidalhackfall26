@@ -50,7 +50,7 @@ Same physics as the first simulator, generated one sample at a time with continu
 - Shared AR(1) drift (τ = 10 s, σ = 3 mHz), continuous for the whole session.
 - Independent Gaussian noise per station, σ = 1 mHz.
 - Per-station 0.25 Hz oscillation with the amplitude of that station's chosen severity.
-- **Fixed phase per station:** North 0, East 0.15, South π, West π + 0.2 rad. So North and East swing together and South and West swing opposite. The user chooses stations and severity; the phase follows from which stations are chosen.
+- **Phase per station:** defaults North 0, East 0.15, South π, West π + 0.2 rad, so North and East swing together and South and West swing opposite. *(Updated later: phase is now user-settable per station via `phase_deg`; see `frontend/MVP.md` Part A1 and this folder's README.)*
 - In the live stream, a severity change fades over 4 s (raised cosine) instead of jumping.
 - `deviation_mhz = round((frequency_hz − 60) × 1000)`, which must fit in signed 16 bits.
 

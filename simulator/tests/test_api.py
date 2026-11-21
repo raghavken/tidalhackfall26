@@ -57,6 +57,46 @@ class TestRest(unittest.TestCase):
             self.assertEqual(c.put("/api/anomaly", json={"North": "extreme"}).status_code, 422)
             self.assertEqual(c.put("/api/anomaly", json=["North"]).status_code, 422)
 
+    def test_phase_deg(self):
+        with client() as c:
+            st = c.get("/api/state").json()
+            self.assertEqual(st["phase_deg"]["South"], 180.0)
+            r = c.put("/api/anomaly", json={"North": "severe", "phase_deg": {"South": 0}})
+            self.assertEqual(r.status_code, 200)
+            self.assertEqual(r.json()["phase_deg"]["South"], 0.0)
+            # omitting phase_deg keeps phases; severities still replace
+            r = c.put("/api/anomaly", json={"East": "mild"}).json()
+            self.assertEqual(r["phase_deg"]["South"], 0.0)
+            self.assertEqual(r["severities"]["North"], "normal")
+            for bad in ({"phase_deg": {"North": 400}}, {"phase_deg": {"Central": 1}},
+                        {"phase_deg": {"North": "x"}}):
+                self.assertEqual(c.put("/api/anomaly", json=bad).status_code, 422, bad)
+            # Diagnose uses the current phase
+            c.put("/api/anomaly", json={"North": "severe", "South": "severe",
+                                        "phase_deg": {"South": 0}})
+            d = c.post("/api/diagnose").json()
+            self.assertEqual(d["analysis"]["phase_relationships"][0]["relationship"], "in_phase")
+
+    def test_status(self):
+        with client() as c:
+            s = c.get("/api/status").json()
+            self.assertEqual(s["fpga"]["detector"], "reference")
+            self.assertTrue(s["fpga"]["available"])
+            self.assertEqual(s["fpga"]["state"], "idle")
+            self.assertIsNone(s["fpga"]["last_diagnosis_id"])
+            self.assertEqual(s["nemotron"]["state"], "not_connected")
+            c.post("/api/diagnose")
+            s = c.get("/api/status").json()
+            self.assertEqual(s["fpga"]["state"], "idle")
+            self.assertEqual(s["fpga"]["last_diagnosis_id"], 1)
+            self.assertIsInstance(s["fpga"]["last_run_ms"], int)
+        with client(detector="hardware") as c:
+            self.assertFalse(c.get("/api/status").json()["fpga"]["available"])
+            c.post("/api/diagnose")
+            s = c.get("/api/status").json()["fpga"]
+            self.assertEqual(s["state"], "error")
+            self.assertIn("not configured", s["last_error"])
+
     def test_pause_resume_reset(self):
         with client() as c:
             self.assertFalse(c.post("/api/stream/pause").json()["running"])
@@ -123,28 +163,34 @@ class TestWebSocket(unittest.TestCase):
 
     def test_state_and_diagnosis_pushed(self):
         with client() as c, c.websocket_connect("/ws/stream") as ws:
-            ws.receive_json()
+            hello = ws.receive_json()
+            self.assertEqual(hello["status"]["fpga"]["state"], "idle")
             c.put("/api/anomaly", json={"West": "severe"})
             c.post("/api/diagnose")
-            seen = {}
+            seen, fpga_states = {}, []
             for _ in range(500):
                 msg = ws.receive_json()
                 if msg["type"] in ("state", "diagnosis"):
                     seen[msg["type"]] = msg
-                if len(seen) == 2:
+                if msg["type"] == "status":
+                    fpga_states.append(msg["status"]["fpga"]["state"])
+                if len(seen) == 2 and fpga_states[-1:] == ["idle"]:
                     break
+            self.assertEqual(fpga_states, ["diagnosing", "idle"])
             self.assertEqual(seen["state"]["state"]["severities"]["West"], "severe")
             self.assertEqual(len(seen["diagnosis"]["window"]), 600)
             self.assertEqual(seen["diagnosis"]["diagnosis"]["fpga_results"][3]["severity"], "severe")
 
     def test_new_client_gets_history(self):
-        with client(speed=200) as c:
+        with client() as c:
+            c.post("/api/stream/pause")
+            hub = c.app.state.hub
+            for _ in range(650):  # > 20 s of data, generated directly (no timing race)
+                hub.sim.next_sample()
             with c.websocket_connect("/ws/stream") as ws:
-                ws.receive_json()
-                read_samples(ws, 650)  # let > 20 s of data accumulate
-            with c.websocket_connect("/ws/stream") as ws2:
-                hello = ws2.receive_json()
+                hello = ws.receive_json()
                 self.assertEqual(len(hello["history"]), 600)
+                self.assertEqual(hello["history"][-1]["sample_index"], hub.sim.sample_index - 1)
 
 
 if __name__ == "__main__":

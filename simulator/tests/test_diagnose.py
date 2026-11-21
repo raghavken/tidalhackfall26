@@ -67,6 +67,13 @@ class TestAnalysis(unittest.TestCase):
         rel, _ = self.relationship({"North": "severe", "South": "mild"}, ("North", "South"))
         self.assertEqual(rel, "opposite")
 
+    def test_custom_phase_north_south_in_phase(self):
+        d, _ = run_diagnosis({"North": "severe", "South": "severe"}, np.random.default_rng(5),
+                             REFERENCE, phase_deg={"South": 0})
+        rel = d["analysis"]["phase_relationships"][0]
+        self.assertEqual(rel["relationship"], "in_phase")
+        self.assertEqual(d["requested_phase_deg"]["South"], 0.0)
+
     def test_classification(self):
         rng = np.random.default_rng(1)
         self.assertEqual(run_diagnosis({}, rng, REFERENCE)[0]["analysis"]["classification"], "none")
@@ -85,6 +92,7 @@ class TestAnalysis(unittest.TestCase):
         d, _ = run_diagnosis({"North": "mild"}, np.random.default_rng(0), REFERENCE)
         e = evidence_only(d)
         self.assertNotIn("requested", e)
+        self.assertNotIn("requested_phase_deg", e)
         self.assertNotIn("matches_request", e)
         self.assertIn("fpga_results", e)
         self.assertIn("requested", d)  # original untouched
