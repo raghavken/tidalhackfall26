@@ -1,8 +1,12 @@
 """REST + WebSocket tests using FastAPI's TestClient (no network needed)."""
 
+import json
 import os
 import sys
 import unittest
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from threading import Thread
+from unittest.mock import patch
 
 ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 sys.path.insert(0, ROOT)
@@ -78,24 +82,78 @@ class TestRest(unittest.TestCase):
             self.assertEqual(d["analysis"]["phase_relationships"][0]["relationship"], "in_phase")
 
     def test_status(self):
-        with client() as c:
+        no_model = {"NEMOTRON_BASE_URL": "", "NEMOTRON_MODEL": "", "SIM_QUARTUS_STP": ""}
+        with patch.dict(os.environ, no_model), client() as c:
             s = c.get("/api/status").json()
             self.assertEqual(s["fpga"]["detector"], "reference")
             self.assertTrue(s["fpga"]["available"])
             self.assertEqual(s["fpga"]["state"], "idle")
             self.assertIsNone(s["fpga"]["last_diagnosis_id"])
-            self.assertEqual(s["nemotron"]["state"], "not_connected")
-            c.post("/api/diagnose")
+            self.assertEqual(s["nemotron"]["state"], "not_configured")
+            self.assertIsNone(s["nemotron"]["model"])
+            d = c.post("/api/diagnose").json()
+            self.assertIsInstance(d["run_ms"], int)
             s = c.get("/api/status").json()
             self.assertEqual(s["fpga"]["state"], "idle")
             self.assertEqual(s["fpga"]["last_diagnosis_id"], 1)
             self.assertIsInstance(s["fpga"]["last_run_ms"], int)
-        with client(detector="hardware") as c:
+            # Explain without a configured model: 503, Nemotron shows not_configured
+            self.assertEqual(c.post("/api/diagnoses/1/explain").status_code, 503)
+            self.assertEqual(c.get("/api/status").json()["nemotron"]["state"], "not_configured")
+        with patch.dict(os.environ, no_model), client(detector="hardware") as c:
             self.assertFalse(c.get("/api/status").json()["fpga"]["available"])
-            c.post("/api/diagnose")
+            self.assertEqual(c.post("/api/diagnose").status_code, 503)
             s = c.get("/api/status").json()["fpga"]
             self.assertEqual(s["state"], "error")
             self.assertIn("not configured", s["last_error"])
+        with patch.dict(os.environ, {"SIM_QUARTUS_STP": "/mnt/c/quartus_stp.exe"}), \
+                client(detector="hardware") as c:
+            self.assertTrue(c.get("/api/status").json()["fpga"]["available"])
+
+    def test_nemotron_status_flow(self):
+        """ready -> thinking -> ready around an explanation, pushed over the WebSocket."""
+        class Model(BaseHTTPRequestHandler):
+            def do_POST(self):
+                self.rfile.read(int(self.headers["Content-Length"]))
+                body = json.dumps({"id": "t", "object": "chat.completion", "created": 0, "model": "m",
+                                   "choices": [{"index": 0, "finish_reason": "stop",
+                                                "message": {"role": "assistant", "content": "ok"}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Model) as server:
+            Thread(target=server.serve_forever, daemon=True).start()
+            env = {"NEMOTRON_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1",
+                   "NEMOTRON_MODEL": "test-nemotron"}
+            try:
+                with patch.dict(os.environ, env), client() as c, c.websocket_connect("/ws/stream") as ws:
+                    hello = ws.receive_json()
+                    self.assertEqual(hello["status"]["nemotron"]["state"], "ready")
+                    self.assertEqual(hello["status"]["nemotron"]["model"], "test-nemotron")
+                    d = c.post("/api/diagnose").json()
+                    self.assertEqual(c.post(f"/api/diagnoses/{d['diagnosis_id']}/explain").status_code, 200)
+                    states, explanation = [], None
+                    for _ in range(500):
+                        msg = ws.receive_json()
+                        if msg["type"] == "status":
+                            states.append(msg["status"]["nemotron"]["state"])
+                        if msg["type"] == "explanation":
+                            explanation = msg["explanation"]
+                        if explanation and states[-1:] == ["ready"] and "thinking" in states:
+                            break
+                    self.assertIn("thinking", states)
+                    self.assertEqual(states[-1], "ready")
+                    self.assertEqual(explanation["analysis"], "ok")
+                    self.assertEqual(c.get("/api/status").json()["nemotron"]["last_diagnosis_id"],
+                                     d["diagnosis_id"])
+            finally:
+                server.shutdown()
 
     def test_pause_resume_reset(self):
         with client() as c:

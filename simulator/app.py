@@ -25,9 +25,9 @@ from fastapi.concurrency import run_in_threadpool
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, ConfigDict, Field
 
-from .detectors import DetectorUnavailable, get_detector
+from .detectors import DetectorUnavailable, detector_available, get_detector
 from .diagnose import run_diagnosis
-from .nemotron import ModelUnavailable, explain_diagnosis
+from .nemotron import ModelUnavailable, configured_model, explain_diagnosis
 from .live_sim import (
     ENERGY_THRESHOLD,
     OSC_FREQUENCY_HZ,
@@ -91,6 +91,34 @@ class Hub:
         self._diagnose_rng = np.random.default_rng()  # fresh noise on every press
         self._diagnose_lock = threading.Lock()
         self._pending = []
+        # Live status for the dashboard pills (GET /api/status, "status" messages)
+        self.fpga = {"state": "idle", "last_diagnosis_id": None, "last_run_ms": None,
+                     "last_error": None}
+        self.nemotron = {"busy": False, "last_error": None, "last_diagnosis_id": None}
+
+    # -- status -------------------------------------------------------------
+    def status(self):
+        model = configured_model()
+        if self.nemotron["busy"]:
+            nemo_state = "thinking"
+        elif not model:
+            nemo_state = "not_configured"
+        elif self.nemotron["last_error"]:
+            nemo_state = "error"
+        else:
+            nemo_state = "ready"
+        return {
+            "stream": {"running": not self.paused, "clients": len(self.clients),
+                       "sample_index": self.sim.sample_index},
+            "fpga": {"detector": self.detector_name,
+                     "available": detector_available(self.detector_name), **self.fpga},
+            "nemotron": {"state": nemo_state, "model": model,
+                         "last_diagnosis_id": self.nemotron["last_diagnosis_id"],
+                         "last_error": self.nemotron["last_error"]},
+        }
+
+    def broadcast_status(self):
+        self.broadcast({"type": "status", "status": self.status()})
 
     # -- messages -----------------------------------------------------------
     def config(self):
@@ -214,6 +242,10 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
     async def get_state():
         return hub.state()
 
+    @app.get("/api/status")
+    async def get_status():
+        return hub.status()
+
     @app.put("/api/anomaly")
     async def put_anomaly(request: AnomalyRequest):
         hub.set_severities(request.as_config(), request.phase_deg)
@@ -228,12 +260,14 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
     async def pause():
         hub.paused = True
         hub.broadcast({"type": "state", "state": hub.state()})
+        hub.broadcast_status()
         return hub.state()
 
     @app.post("/api/stream/resume")
     async def resume():
         hub.paused = False
         hub.broadcast({"type": "state", "state": hub.state()})
+        hub.broadcast_status()
         return hub.state()
 
     @app.post("/api/stream/reset")
@@ -243,13 +277,28 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
 
     @app.post("/api/diagnose")
     async def diagnose():
+        if hub.fpga["state"] == "diagnosing":
+            raise HTTPException(status_code=409, detail="A diagnosis is already running.")
         severities = dict(hub.sim.severities)
+        hub.fpga.update(state="diagnosing", last_error=None)
+        hub.broadcast_status()
+        started = time.perf_counter()
         try:
             diagnosis, window = await run_in_threadpool(hub.diagnose, severities, dict(hub.sim.phases))
         except DetectorUnavailable as exc:
+            hub.fpga.update(state="error", last_error=str(exc))
+            hub.broadcast_status()
             raise HTTPException(status_code=503, detail=str(exc))
+        except Exception as exc:
+            hub.fpga.update(state="error", last_error=str(exc))
+            hub.broadcast_status()
+            raise
+        run_ms = round((time.perf_counter() - started) * 1000)
+        diagnosis["run_ms"] = run_ms
+        hub.fpga.update(state="idle", last_diagnosis_id=diagnosis["diagnosis_id"], last_run_ms=run_ms)
         hub.diagnoses.append(diagnosis)
         hub.broadcast({"type": "diagnosis", "diagnosis": diagnosis, "window": window})
+        hub.broadcast_status()
         return diagnosis
 
     @app.get("/api/diagnoses")
@@ -262,10 +311,18 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
                           if record["diagnosis_id"] == diagnosis_id), None)
         if diagnosis is None:
             raise HTTPException(status_code=404, detail="Diagnosis is no longer available.")
+        hub.nemotron.update(busy=True)
+        hub.broadcast_status()
         try:
-            return await explain_diagnosis(diagnosis, hub.config())
+            result = await explain_diagnosis(diagnosis, hub.config())
         except ModelUnavailable as exc:
+            hub.nemotron.update(busy=False, last_error=str(exc))
+            hub.broadcast_status()
             raise HTTPException(status_code=exc.status_code, detail=str(exc)) from exc
+        hub.nemotron.update(busy=False, last_error=None, last_diagnosis_id=diagnosis_id)
+        hub.broadcast({"type": "explanation", "explanation": result})
+        hub.broadcast_status()
+        return result
 
     # -- WebSocket ------------------------------------------------------------
     @app.websocket("/ws/stream")
@@ -274,6 +331,7 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
         queue = asyncio.Queue(maxsize=CLIENT_QUEUE_SIZE)
         hub.clients.add(queue)
         await ws.send_json({"type": "hello", "config": hub.config(), "state": hub.state(),
+                            "status": hub.status(),
                             "history": hub.sim.recent(HELLO_HISTORY_SAMPLES)})
 
         async def sender():

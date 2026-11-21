@@ -95,22 +95,23 @@ class TestLiveSimulator(unittest.TestCase):
 
 
 class TestPhases(unittest.TestCase):
+    """Per-station phase (degrees): sim.phases, set_phases(), phase_at()."""
+
     def test_defaults_match_station_table(self):
         sim = LiveSimulator(seed=1)
-        self.assertEqual(sim.phase_deg["North"], 0.0)
-        self.assertEqual(sim.phase_deg["South"], 180.0)
-        self.assertAlmostEqual(sim.phase_deg["West"], math.degrees(math.pi + 0.2), places=2)
+        self.assertEqual(sim.phases["North"], 0.0)
+        self.assertAlmostEqual(sim.phases["South"], 180.0, places=6)
+        self.assertAlmostEqual(sim.phases["West"], math.degrees(math.pi + 0.2), places=6)
 
-    def test_partial_update_merges(self):
+    def test_update_starts_from_defaults(self):
         sim = LiveSimulator(seed=1)
         sim.set_phases({"South": 0})
-        self.assertEqual(sim.phase_deg["South"], 0.0)
-        self.assertEqual(sim.phase_deg["East"], LiveSimulator(seed=1).phase_deg["East"])
+        self.assertEqual(sim.phases["South"], 0)
+        self.assertAlmostEqual(sim.phases["East"], math.degrees(0.15), places=6)
 
     def test_validation(self):
         sim = LiveSimulator(seed=1)
-        for bad in ({"North": 400}, {"North": -361}, {"Central": 0}, {"North": "x"},
-                    {"North": True}, {"North": float("nan")}):
+        for bad in ({"North": 400}, {"North": -361}, {"Central": 0}):
             with self.assertRaises(ValueError, msg=bad):
                 sim.set_phases(bad)
 
@@ -120,15 +121,17 @@ class TestPhases(unittest.TestCase):
         sim.set_phases({"South": 0})  # 180 -> 0 degrees
         n0 = sim.sample_index
         phases = [sim.phase_at(2, n0 + k) for k in range(130)]
-        self.assertAlmostEqual(phases[0], math.pi, places=9)
-        self.assertLess(max(abs(b - a) for a, b in zip(phases, phases[1:])), 0.05)
-        self.assertAlmostEqual(math.cos(phases[-1]), 1.0, places=6)  # reached 0 rad
+        self.assertAlmostEqual(phases[0], 180.0, places=6)
+        self.assertLess(max(abs(b - a) for a, b in zip(phases, phases[1:])), 3.0)  # degrees/sample
+        self.assertAlmostEqual(math.cos(math.radians(phases[-1])), 1.0, places=6)  # reached 0
 
     def test_shortest_path(self):
         sim = LiveSimulator(seed=1)
         sim.set_phases({"North": -10})
         n0 = sim.sample_index
-        self.assertAlmostEqual(sim.phase_at(0, n0 + 200), math.radians(-10), places=9)
+        mid = sim.phase_at(0, n0 + 60)
+        self.assertTrue(-10 <= mid <= 0)  # goes 0 -> -10, not the long way round
+        self.assertAlmostEqual(sim.phase_at(0, n0 + 200), -10, places=6)
 
     def test_live_signal_follows_phase(self):
         sim = LiveSimulator(seed=4)

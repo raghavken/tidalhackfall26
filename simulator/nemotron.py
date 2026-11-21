@@ -31,6 +31,16 @@ class ModelUnavailable(RuntimeError):
         self.status_code = status_code
 
 
+def configured_model():
+    """The configured model name, or None if NEMOTRON_BASE_URL/MODEL are missing."""
+    settings = dotenv_values(ENV_FILE, interpolate=False)
+
+    def setting(name):
+        return (os.environ.get(name, settings.get(name)) or "").strip()
+
+    return setting("NEMOTRON_MODEL") if setting("NEMOTRON_BASE_URL") and setting("NEMOTRON_MODEL") else None
+
+
 async def explain_diagnosis(diagnosis, config):
     settings = dotenv_values(ENV_FILE, interpolate=False)
 

@@ -69,10 +69,9 @@ class TestAnalysis(unittest.TestCase):
 
     def test_custom_phase_north_south_in_phase(self):
         d, _ = run_diagnosis({"North": "severe", "South": "severe"}, np.random.default_rng(5),
-                             REFERENCE, phase_deg={"South": 0})
+                             REFERENCE, phases={"South": 0})
         rel = d["analysis"]["phase_relationships"][0]
         self.assertEqual(rel["relationship"], "in_phase")
-        self.assertEqual(d["requested_phase_deg"]["South"], 0.0)
 
     def test_classification(self):
         rng = np.random.default_rng(1)

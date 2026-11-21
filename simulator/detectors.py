@@ -91,3 +91,14 @@ def get_detector(name):
     if name not in DETECTORS:
         raise ValueError(f"unknown detector {name!r}; choose from {list(DETECTORS)}")
     return DETECTORS[name]()
+
+
+def detector_available(name):
+    """Whether the named detector is set up to run (for the status endpoint)."""
+    if name == "hardware":
+        return bool(os.environ.get("SIM_QUARTUS_STP"))
+    try:
+        _import_reference_detector()
+    except DetectorUnavailable:
+        return False
+    return True
