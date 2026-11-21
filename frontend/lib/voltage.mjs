@@ -21,14 +21,15 @@ export function maxVoltageKv(tag) {
 }
 
 // Colour bands (OpenInfraMap-like). Order matters: first match wins.
+// Desaturated versions of the conventional OpenInfraMap voltage colours.
 export const VOLTAGE_BANDS = [
-  { minKv: 300, label: '345 kV', color: '#b26bff' },
-  { minKv: 200, label: '230 kV', color: '#4f8cff' },
-  { minKv: 130, label: '138 kV', color: '#ff4d5e' },
-  { minKv: 100, label: '115 kV', color: '#ff6d3a' },
-  { minKv: 60, label: '69 kV', color: '#ffa13d' },
+  { minKv: 300, label: '345 kV', color: '#9384C4' },
+  { minKv: 200, label: '230 kV', color: '#6489C2' },
+  { minKv: 130, label: '138 kV', color: '#B56B6B' },
+  { minKv: 100, label: '115 kV', color: '#B27B5A' },
+  { minKv: 60, label: '69 kV', color: '#A8955F' },
 ];
-export const UNKNOWN_VOLTAGE_COLOR = '#7d8a9c';
+export const UNKNOWN_VOLTAGE_COLOR = '#5F5F68';
 
 export function voltageColor(kv) {
   if (kv === null || kv === undefined || !Number.isFinite(kv)) return UNKNOWN_VOLTAGE_COLOR;
@@ -46,5 +47,5 @@ export function voltageColorExpression() {
 /** Line width grows with voltage: ~1.4 px at 69 kV up to ~2.6 px at 345 kV. */
 export function voltageWidthExpression() {
   return ['interpolate', ['linear'], ['coalesce', ['get', 'maxKv'], 60],
-    60, 1.4, 138, 1.8, 345, 2.6];
+    60, 1.1, 138, 1.5, 345, 2.2];
 }

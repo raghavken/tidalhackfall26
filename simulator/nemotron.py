@@ -19,8 +19,10 @@ mode but does not establish a source or a real grid topology. Distinguish
 detector results from backend phase and amplitude estimates. Use the supplied
 window and detector type, acknowledge missing or uncertain evidence, and do
 not invent causes, topology, equipment conditions, or live utility data.
-Give a short assessment, the key measurements supporting it, and one
-diagnostic follow-up. Use plain text and keep the answer under 180 words."""
+If grid_context lists critical facilities near the alarmed substations, say
+which could be affected, and note that it is a proximity estimate, not
+confirmed service areas. Give a short assessment, the key measurements
+supporting it, and one diagnostic follow-up. Use plain text and keep the answer under 180 words."""
 
 
 class ModelUnavailable(RuntimeError):
@@ -41,7 +43,7 @@ def configured_model():
     return setting("NEMOTRON_MODEL") if setting("NEMOTRON_BASE_URL") and setting("NEMOTRON_MODEL") else None
 
 
-async def explain_diagnosis(diagnosis, config):
+async def explain_diagnosis(diagnosis, config, context=None):
     settings = dotenv_values(ENV_FILE, interpolate=False)
 
     def setting(name, default=""):
@@ -68,6 +70,8 @@ async def explain_diagnosis(diagnosis, config):
         "severity_bands": config["severities"],
         "diagnosis": evidence_only(diagnosis),
     }
+    if context:
+        evidence["grid_context"] = context
     try:
         async with AsyncOpenAI(base_url=base_url, api_key=setting("NEMOTRON_API_KEY", "local"),
                                timeout=timeout, max_retries=0) as client:

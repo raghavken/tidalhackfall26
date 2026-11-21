@@ -54,11 +54,12 @@ export function modelParams(substation) {
   };
 }
 
-/** Severity -> glow colour for the 3D scene (a text label is always shown too). */
+// Glow is reserved for an actual oscillation: none when normal; amber -> red
+// with severity. (A text label is always shown too.)
 export const SEVERITY_GLOW = {
-  normal: '#e8eef6',
-  mild: '#ffd34d',
-  moderate: '#ff9a3c',
-  severe: '#ff4d4d',
-  preview: '#8b97a8',
+  normal: '#000000',
+  mild: '#E0A33A',
+  moderate: '#E07B39',
+  severe: '#E5484D',
+  preview: '#000000',
 };

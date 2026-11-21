@@ -10,16 +10,19 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 import { modelParams, SEVERITY_GLOW } from '../lib/substationModel.mjs';
 
 const OSC_HZ = 0.25;
+// Restrained, realistic materials: galvanised steel, grey transformers,
+// brown porcelain insulators, concrete control house, gravel yard.
+const BACKGROUND = '#141416';
 const MAT = {
-  ground: new THREE.MeshStandardMaterial({ color: '#16211b', roughness: 1 }),
-  gravel: new THREE.MeshStandardMaterial({ color: '#3a3f46', roughness: 0.95 }),
-  steel: new THREE.MeshStandardMaterial({ color: '#8f9aa7', metalness: 0.6, roughness: 0.45 }),
-  tower: new THREE.LineBasicMaterial({ color: '#9aa6b4' }),
-  fence: new THREE.LineBasicMaterial({ color: '#56606c' }),
-  transformer: new THREE.MeshStandardMaterial({ color: '#4c5664', metalness: 0.3, roughness: 0.6 }),
-  insulator: new THREE.MeshStandardMaterial({ color: '#b9a48a', roughness: 0.7 }),
-  house: new THREE.MeshStandardMaterial({ color: '#c8c2b4', roughness: 0.85 }),
-  roof: new THREE.MeshStandardMaterial({ color: '#59606a', roughness: 0.8 }),
+  ground: new THREE.MeshStandardMaterial({ color: '#1B1C1A', roughness: 1 }),
+  gravel: new THREE.MeshStandardMaterial({ color: '#2E2F31', roughness: 0.95 }),
+  steel: new THREE.MeshStandardMaterial({ color: '#9CA3AB', metalness: 0.55, roughness: 0.5 }),
+  tower: new THREE.LineBasicMaterial({ color: '#8E949B' }),
+  fence: new THREE.LineBasicMaterial({ color: '#4A4D52' }),
+  transformer: new THREE.MeshStandardMaterial({ color: '#5B6168', metalness: 0.25, roughness: 0.65 }),
+  insulator: new THREE.MeshStandardMaterial({ color: '#7A5A44', roughness: 0.6 }),
+  house: new THREE.MeshStandardMaterial({ color: '#8D8A84', roughness: 0.9 }),
+  roof: new THREE.MeshStandardMaterial({ color: '#3F4246', roughness: 0.8 }),
 };
 
 function box(w, h, d, material, x = 0, y = 0, z = 0) {
@@ -177,9 +180,9 @@ export default function SubstationScene({ target, severity, amplitudeMhz, verdic
     renderer.setSize(host.clientWidth, host.clientHeight);
     host.appendChild(renderer.domElement);
     const scene = new THREE.Scene();
-    scene.background = new THREE.Color('#0b1420');
-    scene.fog = new THREE.Fog('#0b1420', 250, 900);
-    scene.add(new THREE.HemisphereLight('#cfe1ff', '#1a2418', 1.1));
+    scene.background = new THREE.Color(BACKGROUND);
+    scene.fog = new THREE.Fog(BACKGROUND, 250, 900);
+    scene.add(new THREE.HemisphereLight('#E8E8EA', '#1B1C1A', 1.05));
     const sun = new THREE.DirectionalLight('#ffffff', 1.6);
     sun.position.set(120, 200, 80);
     scene.add(sun);
@@ -195,10 +198,11 @@ export default function SubstationScene({ target, severity, amplitudeMhz, verdic
       idleTimer = setTimeout(() => { controls.autoRotate = true; }, 8000);
     });
 
-    const glowMaterial = new THREE.MeshStandardMaterial({ color: '#2a313b', emissive: '#e8eef6',
-      emissiveIntensity: 0.4, metalness: 0.3, roughness: 0.5 });
-    const beaconMaterial = new THREE.MeshStandardMaterial({ color: '#333a44', emissive: '#555c66',
-      emissiveIntensity: 0.4 });
+    // Busbars/conductors: plain aluminium unless the station is oscillating
+    const glowMaterial = new THREE.MeshStandardMaterial({ color: '#B8BCC2', emissive: '#000000',
+      emissiveIntensity: 0, metalness: 0.5, roughness: 0.4 });
+    const beaconMaterial = new THREE.MeshStandardMaterial({ color: '#3A3B3F', emissive: '#000000',
+      emissiveIntensity: 0 });
     view.current = { renderer, scene, camera, controls, glowMaterial, beaconMaterial, model: null };
 
     const clock = new THREE.Clock();
@@ -207,8 +211,11 @@ export default function SubstationScene({ target, severity, amplitudeMhz, verdic
       const t = clock.getElapsedTime();
       const { target: tg, severity: sev, amplitudeMhz: amp, verdict: vd } = props.current;
       const live = tg?.kind === 'station' ? latest.current?.deviation_mhz?.[tg.stationIndex] : null;
-      glowMaterial.emissive.set(SEVERITY_GLOW[tg?.kind === 'preview' ? 'preview' : sev] || SEVERITY_GLOW.normal);
-      glowMaterial.emissiveIntensity = live == null ? 0.35 : 0.3 + Math.min(1, Math.abs(live) / 30) * 1.7;
+      // Glow only for an actual oscillation; intensity follows the live deviation
+      const oscillating = tg?.kind === 'station' && sev && sev !== 'normal';
+      glowMaterial.emissive.set(oscillating ? SEVERITY_GLOW[sev] : '#000000');
+      glowMaterial.emissiveIntensity = oscillating && live != null
+        ? 0.15 + Math.min(1, Math.abs(live) / 30) * 1.1 : 0;
       const model = view.current.model;
       if (model) {
         const strength = tg?.kind === 'station' ? Math.min(1, (amp || 0) / 30) : 0;
@@ -216,15 +223,16 @@ export default function SubstationScene({ target, severity, amplitudeMhz, verdic
         model.sway.position.y = wave * 0.9 * strength;
         model.sway.rotation.x = wave * 0.006 * strength;
       }
+      // Beacon: red pulse on a detector alarm; steady blue when clear; off otherwise
       if (vd === 'alarm') {
-        beaconMaterial.emissive.set('#ff3030');
-        beaconMaterial.emissiveIntensity = 1.2 + Math.sin(t * 6) * 0.8;
+        beaconMaterial.emissive.set('#E5484D');
+        beaconMaterial.emissiveIntensity = 0.9 + Math.sin(t * 4) * 0.5;
       } else if (vd === 'clear') {
-        beaconMaterial.emissive.set('#36d67a');
-        beaconMaterial.emissiveIntensity = 1.1;
+        beaconMaterial.emissive.set('#60A5FA');
+        beaconMaterial.emissiveIntensity = 0.6;
       } else {
-        beaconMaterial.emissive.set('#555c66');
-        beaconMaterial.emissiveIntensity = 0.4;
+        beaconMaterial.emissive.set('#000000');
+        beaconMaterial.emissiveIntensity = 0;
       }
       controls.update();
       renderer.render(scene, camera);

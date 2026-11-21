@@ -1,10 +1,22 @@
 'use client';
 
-// Canvas line chart of frequency deviation (mHz) for all four stations.
+// Frequency-deviation chart drawn like an instrument trace: thin lines, no
+// fills, subtle grid, labelled axes with units. Δf = f − 60.000 Hz.
 import { useEffect, useRef } from 'react';
-import { STATION_COLORS, STATION_NAMES } from '../lib/stations';
+import { STATION_COLORS, STATION_LABEL, STATION_NAMES } from '../lib/stations';
 
-export default function Waveform({ samples, height = 270, label }) {
+const GRID = '#1F1F23';
+const AXIS = '#3F3F46';
+const TICK_TEXT = '#8B8B95';
+const MONO = '"JetBrains Mono", ui-monospace, "SFMono-Regular", Consolas, monospace';
+
+function niceStep(range) {
+  const raw = range / 4;
+  const mag = 10 ** Math.floor(Math.log10(raw));
+  return [1, 2, 2.5, 5, 10].map(m => m * mag).find(s => s >= raw) ?? raw;
+}
+
+export default function Waveform({ samples, height = 220, label, showLegend = true }) {
   const canvas = useRef(null);
   useEffect(() => {
     const target = canvas.current;
@@ -16,30 +28,69 @@ export default function Waveform({ samples, height = 270, label }) {
       target.height = h * scale;
       const ctx = target.getContext('2d');
       ctx.scale(scale, scale);
-      const bound = Math.max(10, ...samples.flatMap(s => s.deviation_mhz.map(Math.abs)));
-      const left = 48;
-      const top = 12;
-      const plotHeight = h - 28;
-      ctx.font = '12px system-ui';
-      for (const fraction of [-1, -0.5, 0, 0.5, 1]) {
-        const y = top + (1 - fraction) * plotHeight / 2;
-        ctx.strokeStyle = fraction === 0 ? '#506785' : '#1e3046';
+      const left = 52;
+      const right = 10;
+      const top = 8;
+      const bottom = 24;
+      const plotW = width - left - right;
+      const plotH = h - top - bottom;
+      const peak = Math.max(5, ...samples.flatMap(s => s.deviation_mhz.map(Math.abs)));
+      const step = niceStep(peak * 2);
+      const bound = Math.ceil(peak / step) * step;
+      const y = v => top + (1 - (v + bound) / (2 * bound)) * plotH;
+
+      ctx.font = `11px ${MONO}`;
+      ctx.lineWidth = 1;
+      // horizontal grid + y ticks
+      for (let v = -bound; v <= bound + 1e-9; v += step) {
+        const yy = Math.round(y(v)) + 0.5;
+        ctx.strokeStyle = v === 0 ? AXIS : GRID;
         ctx.beginPath();
-        ctx.moveTo(left, y);
-        ctx.lineTo(width - 8, y);
+        ctx.moveTo(left, yy);
+        ctx.lineTo(width - right, yy);
         ctx.stroke();
-        ctx.fillStyle = '#aebfd5';
-        ctx.fillText(String(Math.round(fraction * bound)), 4, y + 4);
+        ctx.fillStyle = TICK_TEXT;
+        ctx.textAlign = 'right';
+        ctx.fillText(`${v > 0 ? '+' : ''}${Math.round(v * 10) / 10}`, left - 6, yy + 4);
       }
+      // time axis: seconds relative to the newest sample
+      const n = samples.length;
+      if (n > 1) {
+        const t0 = samples[0].time_seconds;
+        const t1 = samples[n - 1].time_seconds;
+        const span = t1 - t0 || 1;
+        ctx.textAlign = 'center';
+        for (let s = 0; s <= span + 1e-9; s += 5) {
+          const xx = Math.round(left + plotW * (1 - s / span)) + 0.5;
+          ctx.strokeStyle = GRID;
+          ctx.beginPath();
+          ctx.moveTo(xx, top);
+          ctx.lineTo(xx, top + plotH);
+          ctx.stroke();
+          ctx.fillStyle = TICK_TEXT;
+          ctx.fillText(s === 0 ? '0 s' : `−${s} s`, xx, h - 8);
+        }
+      }
+      ctx.save();
+      ctx.translate(12, top + plotH / 2);
+      ctx.rotate(-Math.PI / 2);
+      ctx.textAlign = 'center';
+      ctx.fillStyle = TICK_TEXT;
+      ctx.font = `11px "Inter Variable", Inter, system-ui, sans-serif`;
+      ctx.fillText('Δf (mHz)', 0, 0);
+      ctx.restore();
+
+      // traces
+      ctx.lineWidth = 1.25;
+      ctx.lineJoin = 'round';
       STATION_NAMES.forEach((name, sid) => {
         ctx.strokeStyle = STATION_COLORS[name];
-        ctx.lineWidth = 1.4;
         ctx.beginPath();
         samples.forEach((sample, i) => {
-          const x = left + (width - left - 8) * i / Math.max(1, samples.length - 1);
-          const y = top + (1 - sample.deviation_mhz[sid] / bound) * plotHeight / 2;
-          if (i === 0) ctx.moveTo(x, y);
-          else ctx.lineTo(x, y);
+          const xx = left + plotW * i / Math.max(1, n - 1);
+          const yy = y(sample.deviation_mhz[sid]);
+          if (i === 0) ctx.moveTo(xx, yy);
+          else ctx.lineTo(xx, yy);
         });
         ctx.stroke();
       });
@@ -49,11 +100,18 @@ export default function Waveform({ samples, height = 270, label }) {
     resize.observe(target);
     return () => resize.disconnect();
   }, [samples]);
+
+  const last = samples.at(-1);
   return <div className="waveform">
     <canvas ref={canvas} style={{ height }} role="img"
-      aria-label={label || 'Frequency deviation in millihertz for all four stations'} />
-    <ul className="legend">{STATION_NAMES.map(name =>
-      <li key={name}><span className="swatch" style={{ background: STATION_COLORS[name] }} />{name}</li>)}
-    </ul>
+      aria-label={label || 'Frequency deviation in millihertz for stations 1 to 4'} />
+    {showLegend && <ul className="trace-legend">{STATION_NAMES.map((name, sid) =>
+      <li key={name}>
+        <span className="trace-swatch" style={{ background: STATION_COLORS[name] }} />
+        <span>{STATION_LABEL[name]}</span>
+        {last && <span className="mono muted">{last.deviation_mhz[sid] > 0 ? '+' : ''}{last.deviation_mhz[sid]} mHz</span>}
+      </li>)}
+      <li className="muted">0 = 60.000 Hz nominal</li>
+    </ul>}
   </div>;
 }

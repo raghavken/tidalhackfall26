@@ -87,12 +87,14 @@ Phases are user-settable per station with `phase_deg` (see `PUT /api/anomaly`).
 
 Each station is set independently to one of four severities. Severity bands are defined on the FPGA's energy, `I² + Q²`, which is about 90,000 × A² for an oscillation of amplitude A mHz. The FPGA alarm threshold of 2,250,000 corresponds to 5 mHz.
 
-| Severity | FPGA energy band | Simulated amplitude |
-|---|---|---|
-| `normal` | < 2,250,000 (no alarm) | 0 mHz |
-| `mild` | 2,250,000 – 8,999,999 | 7 mHz |
-| `moderate` | 9,000,000 – 35,999,999 | 14 mHz |
-| `severe` | ≥ 36,000,000 | 30 mHz |
+| Severity | FPGA energy band (raw, mHz²) | Same band in Hz² | Simulated amplitude |
+|---|---|---|---|
+| `normal` | < 2,250,000 (no alarm) | < 2.25 Hz² | 0 mHz |
+| `mild` | 2,250,000 – 8,999,999 (alarm) | 2.25 – 9 Hz² | 7 mHz |
+| `moderate` | 9,000,000 – 35,999,999 (alarm) | 9 – 36 Hz² | 14 mHz |
+| `severe` | ≥ 36,000,000 (alarm) | ≥ 36 Hz² | 30 mHz |
+
+Units: I and Q are sums of frequency deviations in mHz, so the raw energy I² + Q² is in mHz². Dividing by 10⁶ gives Hz² (1 Hz² = 10⁶ mHz²); the dashboard shows energy this way, so the alarm threshold reads **2.25 Hz²**. The API and the FPGA keep the raw integer.
 
 Each amplitude sits in the middle of its band. In testing, every one of the 256 station/severity combinations landed in its requested band.
 
@@ -124,7 +126,7 @@ Diagnose windows use the same model at full amplitude from the first sample, wit
 | `POST /api/stream/reset` | optional `{"seed": 42}` | Restarts at sample 0. Severities and phases are kept. |
 | `POST /api/diagnose` | — | Diagnosis (below), including `run_ms`. `503` if the detector is unavailable, `409` if a diagnosis is already running. |
 | `GET /api/diagnoses` | — | The last 20 diagnoses |
-| `POST /api/diagnoses/{id}/explain` | — | `{diagnosis_id, model, analysis}` from Nemotron. `404` unknown diagnosis, `503` model not configured, `502` inference failed. |
+| `POST /api/diagnoses/{id}/explain` | optional `{"context": {...}}` | `{diagnosis_id, model, analysis}` from Nemotron. The optional `context` (the dashboard sends nearby critical facilities for alarmed stations) is passed to the model as `grid_context`, and the prompt treats it as a proximity estimate. Without a body it behaves as before. `404` unknown diagnosis, `503` model not configured, `502` inference failed, `422` unknown body fields. |
 
 ### Status (`GET /api/status` and the `status` WebSocket message)
 
@@ -222,12 +224,12 @@ Each measurement is a 7-byte little-endian packet: `AA`, station ID (0–3), sam
 python -m pytest simulator/tests
 ```
 
-The 44 tests cover:
+The 45 tests cover:
 - **Generator:** sample format, reproducibility, fades with no jumps, steady-state amplitudes, configuration validation, the history buffer.
 - **Phase:** defaults, updates, validation, smooth shortest-path slide, live signal following the phase.
 - **Severity bands:** band edges.
 - **Diagnose:** FPGA input validation, all 256 station/severity combinations, in-phase/opposite detection, fresh noise per press, ground-truth stripping, missing hardware configuration.
-- **API:** REST endpoints and errors, `phase_deg`, `/api/status` (FPGA and Nemotron states, hardware availability), WebSocket hello/batching/continuity, identical data for two clients, pushed state/status/diagnosis/explanation messages, history for late joiners.
+- **API:** REST endpoints and errors, `phase_deg`, `/api/status` (FPGA and Nemotron states, hardware availability), WebSocket hello/batching/continuity, identical data for two clients, pushed state/status/diagnosis/explanation messages, history for late joiners, explain with optional facility context.
 - **Nemotron:** explanation request contents and ground-truth stripping (`test_nemotron.py`).
 - **Frozen data:** the FPGA data files are unchanged.
 

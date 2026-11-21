@@ -51,16 +51,21 @@ export function bboxInside(inner, outer) {
   return inner[0] >= outer[0] && inner[1] >= outer[1] && inner[2] <= outer[2] && inner[3] <= outer[3];
 }
 
-export function buildQuery([s, w, n, e]) {
+/**
+ * Overpass query for transmission infrastructure in a bbox.
+ * `usBorder: true` (default) clips to the US border via the OSM country area;
+ * it costs extra server time, so interior regions can skip it.
+ * `timeoutS` is the server-side query timeout.
+ */
+export function buildQuery([s, w, n, e], { usBorder = true, timeoutS = 60 } = {}) {
   const box = `(${s},${w},${n},${e})`;
-  // (area.us) keeps only features inside the United States border.
-  return `[out:json][timeout:60];
-area["ISO3166-1"="US"][admin_level=2]->.us;
-nwr["power"="substation"](area.us)${box};
+  const us = usBorder ? '(area.us)' : '';
+  return `[out:json][timeout:${timeoutS}];
+${usBorder ? 'area["ISO3166-1"="US"][admin_level=2]->.us;\n' : ''}nwr["power"="substation"]${us}${box};
 out geom tags;
-nwr["power"="plant"](area.us)${box};
+nwr["power"="plant"]${us}${box};
 out center tags;
-way["power"="line"](area.us)${box};
+way["power"="line"]${us}${box};
 out geom tags;`;
 }
 
@@ -164,7 +169,7 @@ export function parseOverpass(json) {
  * so one hung server can't starve the mirrors. Throws if every server fails.
  */
 export async function fetchInfrastructure(bbox, { timeoutMs = 25000, fetchImpl = fetch,
-  urls = OVERPASS_URLS } = {}) {
+  urls = OVERPASS_URLS, usBorder = true } = {}) {
   const deadline = Date.now() + timeoutMs;
   const perServerMs = Math.max(5000, Math.floor(timeoutMs / urls.length));
   const errors = [];
@@ -176,7 +181,8 @@ export async function fetchInfrastructure(bbox, { timeoutMs = 25000, fetchImpl =
         method: 'POST',
         headers: { 'Content-Type': 'application/x-www-form-urlencoded',
           'User-Agent': 'oscillation-cartographer/0.1 (hackathon demo)' },
-        body: 'data=' + encodeURIComponent(buildQuery(bbox)),
+        body: 'data=' + encodeURIComponent(buildQuery(bbox,
+          { usBorder, timeoutS: Math.max(25, Math.ceil(remaining / 1000)) })),
         signal: AbortSignal.timeout(remaining),
       });
       if (!response.ok) throw new Error(`HTTP ${response.status}`);

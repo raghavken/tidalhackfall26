@@ -45,6 +45,10 @@ export function useSimulator() {
             setSamples(message.history.slice(-WAVEFORM_SAMPLES));
             latest.current = message.history.at(-1) ?? null;
             setConnection('live');
+            // Restore the latest diagnosis after a reload (existing GET /api/diagnoses)
+            fetch('/api/diagnoses').then(r => (r.ok ? r.json() : [])).then(list => {
+              if (list.length) setDiagnosis(current => current ?? list[list.length - 1]);
+            }).catch(() => {});
             break;
           case 'samples':
             latest.current = message.samples.at(-1);
@@ -104,8 +108,11 @@ export function useSimulator() {
     return result;
   }, []);
 
-  const explain = useCallback(async diagnosisId => {
-    const result = await api(`diagnoses/${diagnosisId}/explain`, { method: 'POST' });
+  // `context` (optional): extra evidence such as nearby critical facilities (Phase 2)
+  const explain = useCallback(async (diagnosisId, context = null) => {
+    const result = await api(`diagnoses/${diagnosisId}/explain`, context
+      ? { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ context }) }
+      : { method: 'POST' });
     setExplanations(previous => ({ ...previous, [result.diagnosis_id]: result }));
     return result;
   }, []);

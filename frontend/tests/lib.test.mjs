@@ -135,7 +135,7 @@ test('assignments persist and a substation holds one station', () => {
 test('assignments survive broken storage', () => {
   const broken = { getItem: () => { throw new Error('blocked'); }, setItem: () => { throw new Error('blocked'); } };
   assert.equal(loadAssignments(broken).East, null);
-  assert.deepEqual(loadPrefs(broken), { showLines: true });
+  assert.deepEqual(loadPrefs(broken), { showLines: true, categories: ['hospital', 'military', 'water', 'oil_gas'] });
   const storage = fakeStorage();
   storage.setItem('oc.assignments.v1', '{not json');
   assert.equal(loadAssignments(storage).West, null);
@@ -189,4 +189,167 @@ test('snapshot file is valid and covers the Brazos Valley', () => {
     assert.ok(lat >= SNAPSHOT_BBOX[0] - 0.05 && lat <= SNAPSHOT_BBOX[2] + 0.05, f.properties.name);
     assert.ok(lon >= SNAPSHOT_BBOX[1] - 0.05 && lon <= SNAPSHOT_BBOX[3] + 0.05, f.properties.name);
   }
+});
+
+// -- pre-downloaded regions ------------------------------------------------------
+import { existsSync } from 'node:fs';
+import { REGIONS, regionFor, regionFile, regionById } from '../lib/regions.mjs';
+
+test('region list is valid and US-only', () => {
+  const ids = REGIONS.map(r => r.id);
+  assert.equal(new Set(ids).size, ids.length);
+  assert.deepEqual(REGIONS.slice(0, 4).map(r => r.group), Array(4).fill('South Texas')); // South Texas first
+  for (const r of REGIONS) assert.deepEqual(parseBbox(r.bbox), r.bbox, r.id); // in US, <= 1.5 degrees
+  assert.equal(regionFile(regionById('brazos-valley')), 'infra-snapshot.json');
+  assert.equal(regionFile(regionById('houston')), 'regions/houston.json');
+});
+
+test('regionFor picks the region that covers the view', () => {
+  const inHouston = [29.70, -95.45, 29.80, -95.30];
+  assert.equal(regionFor(inHouston).region.id, 'houston');
+  assert.equal(regionFor(inHouston).contained, true);
+  const mostlyHouston = [29.40, -95.60, 29.90, -95.10];           // spills past the south edge
+  assert.equal(regionFor(mostlyHouston).region.id, 'houston');
+  assert.equal(regionFor(mostlyHouston).contained, false);
+  assert.equal(regionFor([35.0, -101.9, 35.3, -101.6]), null);     // Amarillo: not pre-loaded
+  assert.equal(regionFor(inHouston, { available: ['austin'] }), null); // file missing -> no match
+});
+
+test('border regions clip to the US; interior ones can skip it', () => {
+  assert.ok(REGIONS.find(r => r.id === 'laredo').border);
+  const q = buildQuery([29.7, -95.45, 29.8, -95.3], { usBorder: false, timeoutS: 200 });
+  assert.doesNotMatch(q, /area\.us/);
+  assert.match(q, /\[timeout:200\]/);
+});
+
+test('downloaded region files are valid', () => {
+  for (const r of REGIONS) {
+    const url = new URL(`../data/${regionFile(r)}`, import.meta.url);
+    if (!existsSync(url)) continue; // not downloaded yet
+    const data = JSON.parse(readFileSync(url));
+    assert.ok(data.substations.features.length > 0, r.id);
+    for (const f of data.substations.features) {
+      const [lon, lat] = f.geometry.coordinates;
+      assert.ok(lat >= r.bbox[0] - 0.05 && lat <= r.bbox[2] + 0.05 && lon >= r.bbox[1] - 0.05 &&
+        lon <= r.bbox[3] + 0.05, `${r.id}: ${f.properties.name}`);
+    }
+  }
+});
+
+// -- Phase 2: critical facilities --------------------------------------------------
+import { CATEGORIES, attributeFacilities, buildFacilitiesQuery, categorize, criticality, describeImpact,
+  isMajorPipeline, parseFacilities } from '../lib/critical.mjs';
+
+test('facility categories', () => {
+  assert.equal(CATEGORIES.length, 8);
+  assert.equal(categorize({ amenity: 'hospital' }), 'hospital');
+  assert.equal(categorize({ landuse: 'military' }), 'military');
+  assert.equal(categorize({ military: 'base' }), 'military');
+  assert.equal(categorize({ military: 'bunker' }), null);                 // minor military features skipped
+  assert.equal(categorize({ man_made: 'wastewater_plant' }), 'water');
+  assert.equal(categorize({ industrial: 'refinery' }), 'oil_gas');
+  assert.equal(categorize({ amenity: 'police' }), 'emergency');
+  assert.equal(categorize({ aeroway: 'aerodrome', iata: 'CLL' }), 'airport');
+  assert.equal(categorize({ aeroway: 'aerodrome', 'aerodrome:type': 'private' }), null); // private strip
+  assert.equal(categorize({ telecom: 'data_center' }), 'data_center');
+  assert.equal(categorize({ amenity: 'university', name: 'Texas A&M University' }), 'university');
+  assert.ok(isMajorPipeline({ man_made: 'pipeline', substance: 'gas', operator: 'Enterprise' }));
+  assert.ok(!isMajorPipeline({ man_made: 'pipeline', substance: 'gas' }));      // unnamed: not major
+  assert.ok(!isMajorPipeline({ man_made: 'pipeline', substance: 'water', name: 'X' }));
+  const q = buildFacilitiesQuery([30, -97, 31, -96], { usBorder: false });
+  assert.doesNotMatch(q, /area\.us/);
+  assert.match(q, /hospital/);
+  assert.match(buildFacilitiesQuery([30, -97, 31, -96]), /\(area\.us\)/);
+});
+
+const subs = [
+  { properties: { id: 'node/1', name: 'Alpha' }, geometry: { coordinates: [-96.30, 30.60] } },
+  { properties: { id: 'node/2', name: 'Bravo' }, geometry: { coordinates: [-96.00, 30.60] } },
+];
+const fac = (id, category, lon, lat, name = null) =>
+  ({ properties: { id, category, name }, geometry: { coordinates: [lon, lat] } });
+
+test('facilities attribute to the nearest substation within 10 km, once each', () => {
+  const facilities = [
+    fac('h1', 'hospital', -96.29, 30.61, 'St. Joseph'),        // ~1.5 km from Alpha
+    fac('h2', 'hospital', -96.02, 30.60),                      // ~2 km from Bravo
+    fac('u1', 'university', -96.28, 30.59, 'Texas A&M University'),
+    fac('far', 'water', -97.50, 31.50),                        // > 10 km from both
+  ];
+  const { bySubstation, attributedTo } = attributeFacilities(facilities, subs);
+  assert.equal(attributedTo.get('h1'), 'node/1');
+  assert.equal(attributedTo.get('h2'), 'node/2');
+  assert.equal(attributedTo.has('far'), false);
+  assert.equal(bySubstation.get('node/1').score, 5 + 2);      // hospital + university weights
+  assert.equal(bySubstation.get('node/2').score, 5);
+  assert.equal(describeImpact(bySubstation.get('node/1')), '1 hospital, Texas A&M University');
+  assert.equal(describeImpact(undefined), '');
+  const c = criticality({ substations: { features: subs }, facilities: { features: facilities } });
+  assert.equal(c.halos.features.length, 2);
+  assert.equal(c.attributionLines.features.length, 3);
+  assert.equal(c.nearestOf.get('u1'), 'Alpha');
+  assert.equal(criticality({ substations: { features: subs } }).halos.features.length, 0); // no facility data
+});
+
+test('Overpass facility parsing', () => {
+  const d = parseFacilities({ elements: [
+    { type: 'way', id: 9, center: { lat: 30.6, lon: -96.3 }, tags: { amenity: 'hospital', name: 'H' } },
+    { type: 'node', id: 10, lat: 30.6, lon: -96.3, tags: { amenity: 'cafe' } },
+    { type: 'way', id: 11, tags: { man_made: 'pipeline', substance: 'gas', operator: 'Op' },
+      geometry: [{ lat: 30, lon: -96 }, { lat: 30.1, lon: -96.1 }] },
+    { type: 'way', id: 9, center: { lat: 30.6, lon: -96.3 }, tags: { amenity: 'hospital', name: 'H' } },
+  ] });
+  assert.equal(d.facilities.features.length, 1);
+  assert.equal(d.facilities.features[0].properties.category, 'hospital');
+  assert.equal(d.pipelines.features.length, 1);
+});
+
+test('facility category prefs persist', () => {
+  const storage = fakeStorage();
+  savePrefs(storage, { showLines: true, categories: ['hospital', 'airport', 'nonsense'] });
+  assert.deepEqual(loadPrefs(storage).categories, ['hospital', 'airport']);
+});
+
+// -- Nemotron report formatting -----------------------------------------------------
+import { inlineSegments, parseReport } from '../lib/reportFormat.mjs';
+
+test('Nemotron text becomes structured report blocks', () => {
+  const text = `Assessment:
+A sustained 0.25 Hz oscillation is present at North and South.
+The stations move in opposite phase.
+
+Key measurements:
+- North: energy 80,974,778 (severe)
+- South: energy 4,416,674 (mild)
+
+**Recommended follow-up**
+1. Request a longer window.
+2. Compare damping.`;
+  const blocks = parseReport(text);
+  assert.deepEqual(blocks.map(b => b.type), ['h', 'p', 'h', 'list', 'h', 'list']);
+  assert.equal(blocks[0].text, 'Assessment');
+  assert.equal(blocks[1].text, 'A sustained 0.25 Hz oscillation is present at North and South. The stations move in opposite phase.');
+  assert.equal(blocks[3].ordered, false);
+  assert.equal(blocks[3].items.length, 2);
+  assert.equal(blocks[4].text, 'Recommended follow-up');
+  assert.equal(blocks[5].ordered, true);
+  assert.deepEqual(parseReport('Just one plain sentence.'), [{ type: 'p', text: 'Just one plain sentence.' }]);
+  assert.deepEqual(parseReport(''), []);
+  assert.deepEqual(inlineSegments('North is **severe** now'),
+    [{ text: 'North is ', bold: false }, { text: 'severe', bold: true }, { text: ' now', bold: false }]);
+});
+
+// -- energy display ----------------------------------------------------------------
+import { formatEnergy, toHz2, rawEnergyTitle, ALARM_THRESHOLD_RAW } from '../lib/energy.mjs';
+
+test('detector energy shown in Hz² (raw mHz² ÷ 10⁶)', () => {
+  assert.equal(toHz2(ALARM_THRESHOLD_RAW), 2.25);
+  assert.equal(formatEnergy(2_250_000), '2.25 Hz²');
+  assert.equal(formatEnergy(81_104_257), '81.1 Hz²');
+  assert.equal(formatEnergy(4_443_970), '4.44 Hz²');
+  assert.equal(formatEnergy(150_000_000), '150 Hz²');
+  assert.equal(formatEnergy(40_925), '0.041 Hz²');
+  assert.equal(formatEnergy(52), '<0.001 Hz²');
+  assert.equal(formatEnergy(0), '0 Hz²');
+  assert.equal(rawEnergyTitle(81_104_257), '81,104,257 mHz² (raw detector I²+Q²)');
 });

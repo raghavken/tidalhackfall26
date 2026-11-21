@@ -3,6 +3,8 @@
 // unit-tested with a fake; all access is wrapped because storage can throw
 // (private windows, blocked site data).
 
+import { CATEGORY_BY_ID, DEFAULT_CATEGORIES } from './critical.mjs';
+
 export const STATION_NAMES = ['North', 'East', 'South', 'West'];
 const ASSIGN_KEY = 'oc.assignments.v1';
 const PREFS_KEY = 'oc.mapPrefs.v1';
@@ -77,7 +79,9 @@ export function stationFor(assignments, substationId) {
 
 export function loadPrefs(storage) {
   const prefs = read(storage, PREFS_KEY, {});
-  return { showLines: prefs.showLines !== false };
+  const categories = Array.isArray(prefs.categories)
+    ? prefs.categories.filter(id => CATEGORY_BY_ID[id]) : [...DEFAULT_CATEGORIES];
+  return { showLines: prefs.showLines !== false, categories };
 }
 
 export function savePrefs(storage, prefs) {

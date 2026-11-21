@@ -61,6 +61,12 @@ class AnomalyRequest(BaseModel):
         return {k: v for k, v in self.model_dump(exclude={"phase_deg"}).items() if v is not None}
 
 
+class ExplainRequest(BaseModel):
+    """Optional extra evidence for Nemotron, e.g. nearby critical facilities (frontend Phase 2)."""
+    model_config = ConfigDict(extra="forbid")
+    context: Optional[dict] = None
+
+
 class ResetRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
     seed: Optional[int] = None
@@ -306,7 +312,7 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
         return list(hub.diagnoses)
 
     @app.post("/api/diagnoses/{diagnosis_id}/explain")
-    async def explain(diagnosis_id: int):
+    async def explain(diagnosis_id: int, request: Optional[ExplainRequest] = None):
         diagnosis = next((record for record in hub.diagnoses
                           if record["diagnosis_id"] == diagnosis_id), None)
         if diagnosis is None:
@@ -314,7 +320,8 @@ def create_app(seed=None, batch=None, detector=None, speed=None):
         hub.nemotron.update(busy=True)
         hub.broadcast_status()
         try:
-            result = await explain_diagnosis(diagnosis, hub.config())
+            result = await explain_diagnosis(diagnosis, hub.config(),
+                                             context=request.context if request else None)
         except ModelUnavailable as exc:
             hub.nemotron.update(busy=False, last_error=str(exc))
             hub.broadcast_status()

@@ -1,15 +1,17 @@
-# Oscillation Cartographer — Live dashboard (Next.js)
+# GridSent — dashboard (Next.js)
 
-The browser dashboard for the live PMU simulator:
-- a map of the **real Brazos Valley power grid** (OpenStreetMap; United States only), where you assign real substations to the four virtual stations (North, East, South, West);
-- a **three.js 3D model** of the selected substation that reacts to the live data;
-- the live frequency waveform, and per-station **severity and phase** controls with **Inject disturbance**;
-- **Diagnose** (FPGA detector), with a verdict panel and **Explain with Nemotron**;
-- **Stream, FPGA and Nemotron status**, always visible.
+Browser interface for the Oscillation Cartographer project: power grid oscillation analysis on **simulated** PMU telemetry, with FPGA detection and Nemotron diagnostics.
 
-The ThinkPad runs the simulator and talks to the DE1 over USB-Blaster. A browser on the same Wi-Fi can view the dashboard.
+- **Grid topology map:** real transmission infrastructure from OpenStreetMap (United States only), cached for 8 Texas regions, plus critical facilities (Phase 2). Assign real substations to stations 1–4.
+- **Substation view:** a three.js model of the selected station's substation, with a live technical readout.
+- **Frequency deviation chart:** Δf = f − 60.000 Hz for stations 1–4, at 30 samples/s.
+- **Disturbance injection:** per-station oscillation severity and phase.
+- **Diagnostic report:** detector output (measured), backend analysis (computed), impact estimate (proximity), and the Nemotron interpretation (AI-generated, clearly separated).
+- **Status bar** (bottom): telemetry stream, detector, Nemotron and topology source.
 
-The specification and every design decision are in [MVP.md](MVP.md). **Phase 1 is built** (this README). **Phase 2, critical facilities, is not built yet**: see [Phase 2 handoff](#phase-2-handoff-critical-facilities).
+Stations are labelled **1–4** in the interface. The simulator and backend call them North (1), East (2), South (3) and West (4); Nemotron's text may use those names.
+
+Specification and decisions: [MVP.md](MVP.md). Phase 1 (map, 3D view, Diagnose) and Phase 2 (critical facilities) are both built.
 
 ## Prerequisites
 
@@ -20,7 +22,7 @@ The specification and every design decision are in [MVP.md](MVP.md). **Phase 1 i
   nvm install 22
   ```
 - **Python** for the simulator: `start.sh` creates `.venv` and installs `simulator/requirements.txt` automatically. Manually: `python3 -m venv .venv && .venv/bin/pip install -r simulator/requirements.txt`.
-- **Optional, for Nemotron:** fill in the repository-root `.env` (see `.env.example` and `simulator/README.md`).
+- **Optional, Nemotron:** fill in the repository-root `.env` (see `.env.example` and `simulator/README.md`).
 
 ## Start everything together
 
@@ -30,28 +32,20 @@ From the repository root in WSL, with the DE1 powered on and USB-Blaster connect
 bash start.sh
 ```
 
-The launcher builds Next.js, invokes Windows PowerShell to compile and
-program the DE1 with Quartus, then starts FastAPI and Next.js. Open
-[localhost:3000](http://localhost:3000). Press Ctrl+C to stop the stack.
+The launcher builds Next.js, invokes Windows PowerShell to compile and program the DE1 with Quartus, then starts FastAPI and Next.js. Open [localhost:3000](http://localhost:3000). Press Ctrl+C to stop the stack.
 
-Use `bash start.sh --skip-program` when the DE1 already holds the current
-bitstream, or `bash start.sh --reference` to use the Python detector (no board needed). Add
-`--lan <ThinkPad-Wi-Fi-IPv4>` to start the Windows relay. See
-`bash start.sh --help` for overrides.
+Use `bash start.sh --skip-program` when the DE1 already holds the current bitstream, or `bash start.sh --reference` to use the Python detector (no board needed). Add `--lan <ThinkPad-Wi-Fi-IPv4>` to start the Windows relay. See `bash start.sh --help` for overrides.
 
 ## Start services individually
 
-In WSL, from the repository root, install the simulator dependencies into
-your Python environment and start FastAPI. Use the Quartus path installed
-on the ThinkPad and a DE1 programmed with the Virtual JTAG image.
+In WSL, from the repository root:
 
 ```bash
 python -m pip install -r simulator/requirements.txt
 SIM_DETECTOR=hardware SIM_QUARTUS_STP=/mnt/c/altera/13.0sp1/quartus/bin64/quartus_stp.exe python -m uvicorn simulator.app:app --host 127.0.0.1 --port 8000
 ```
 
-Without the hardware environment variables, Diagnose uses the Python
-reference. The dashboard displays the selected detector.
+Without the hardware environment variables, Diagnose uses the Python reference (a bit-exact model of the FPGA).
 
 In another WSL terminal:
 
@@ -59,203 +53,186 @@ In another WSL terminal:
 cd frontend
 npm ci
 npm run build
-npm start
+npm start        # or `npm run dev` for hot reload
 ```
 
-For development with hot reload, use `npm run dev` instead of build + start.
+Open [localhost:3000](http://localhost:3000). Next.js forwards `/api/*` and `/ws/stream` to FastAPI on port 8000 (`next.config.mjs`; change the target with `SIMULATOR_URL`, read at build time for `npm start`). `/infra` (map data) and `/map-worker/*` (MapLibre's worker script) are served by Next.js itself.
 
-Open [localhost:3000](http://localhost:3000). Next.js forwards `/api/*` and `/ws/stream` to FastAPI on port 8000 (`next.config.mjs`; change the target with `SIMULATOR_URL`, which is read at build time for `npm start`). The map data route `/infra` is served by Next.js itself.
+**Demo links:** `/?region=<id>` opens the map at a cached region, for example `/?region=houston`. The ids are listed under [Map data](#map-data-infra).
 
 ### Wi-Fi access
 
-To enable access over Wi-Fi with the default WSL NAT setup, run the relay from the repository
-root in Windows PowerShell with Windows Node.js installed. Replace the
-example address with the ThinkPad's Wi-Fi IPv4 address from `ipconfig`.
+With the default WSL NAT setup, run the relay from the repository root in Windows PowerShell with Windows Node.js installed, using the ThinkPad's Wi-Fi IPv4 address from `ipconfig`:
 
 ```powershell
 node frontend/lan.mjs 192.168.1.20
 ```
 
-Open `http://192.168.1.20:3000` on the other computer using that same address.
-The relay binds to that Windows interface and forwards to WSL Next.js.
-Next.js proxies REST and WebSocket traffic to FastAPI over loopback.
-If Windows blocks incoming requests, allow TCP 3000 from the Wi-Fi subnet
-on the Wi-Fi interface. Clients share the simulator and its controls, so use
-a trusted network. A Wi-Fi network with client isolation can block access.
+Open `http://192.168.1.20:3000` on the other computer. The relay forwards to WSL Next.js, which proxies REST and WebSocket traffic to FastAPI. If Windows blocks incoming requests, allow TCP 3000 from the Wi-Fi subnet. Clients share the simulator and its controls, so use a trusted network.
 
 ### npm scripts
 
 | Command | What it does |
 |---|---|
-| `npm run dev` | Development server (hot reload) on port 3000 |
+| `npm run dev` | Development server with hot reload |
 | `npm run build` / `npm start` | Production build and server |
-| `npm test` | Unit tests for the pure libraries (`node --test`, 13 tests) |
-| `npm run snapshot` | Re-download the Brazos Valley map snapshot from OpenStreetMap |
+| `npm test` | Unit tests for the pure libraries (`node --test`, 23 tests) |
+| `npm run regions [-- <ids>] [-- --force]` | Download cached power-grid regions from OpenStreetMap |
+| `npm run facilities [-- <ids>] [-- --force]` | Download critical facilities for regions |
+| `npm run snapshot` | Re-download the Brazos Valley grid (the original snapshot) |
 | `npm run lan` | Wi-Fi relay (`lan.mjs`) |
 
-## Use the dashboard
+The download scripts skip regions that already have a file, and retry the overloaded public Overpass servers patiently (`lib/overpassRetry.mjs`). Expect 35–75 s per region when the servers cooperate.
 
-1. **Assign stations:** on the grid map, click a substation (white dot). The popup has **View in 3D** (opens a Preview tab, so you can inspect it first) and **Assign as N / E / S / W**. Assigned substations get a coloured letter badge, and assignments are saved in your browser.
-2. **Inject a disturbance:** in *Station controls*, set each station's severity (normal / mild / moderate / severe) and phase (°), then press **Inject disturbance**. Within about 4 s:
-   - the waveform changes;
-   - the map badges pulse (one ring every 4 s, larger for higher severity);
-   - the 3D model glows in the severity colour and sways at 0.25 Hz.
-3. **Diagnose:** press **Diagnose**. The FPGA pill shows "diagnosing…" (in hardware mode the ThinkPad sends 2,400 packets to the DE1 and checks the four returned packets; the waveform keeps streaming). The *FPGA verdict* panel then shows:
-   - a summary;
-   - energy bars against the severity bands;
-   - phase relationships;
-   - the 20 s window that was analysed;
-   - a demo check (whether the result matches what was injected).
+## Using the dashboard
 
-   Alarmed stations turn red on the map (lines between them light up), and the 3D beacon turns red or green.
-4. **Explain with Nemotron:** in the verdict panel. The Nemotron pill shows "thinking…", then the analysis appears under the verdict. The button is disabled when Nemotron isn't configured on the backend.
-5. **Power lines** checkbox: hides or shows the transmission lines and legend; the choice is remembered. **Load in view** fetches live OpenStreetMap data for the area you've panned to (US only).
+1. **Choose a region:** use the *Region* menu in the map header, or `/?region=…`.
+2. **Assign stations:** click a substation (white dot) for **View in 3D** (opens a *Preview* in the substation panel) or **Assign as station 1–4**. Assigned substations show a numbered badge; assignments are saved in the browser.
+3. **Facilities:** the map's **Facilities** button lists the 8 categories with counts and toggles. Grey rings on substations show criticality (facilities within 10 km whose nearest transmission substation it is).
+4. **Inject a disturbance:** in *Disturbance injection*, set each station's oscillation (none / mild 7 / moderate 14 / severe 30 mHz) and phase, then **Inject disturbance**. Within about 4 s:
+   - the chart changes;
+   - the station's map badge pulses once every 4 s (amber, or red for severe);
+   - the substation model's conductors glow amber or red and sway at 0.25 Hz.
+5. **Run diagnosis:** sends the last 20 s (2,400 measurements) to the detector. Energy (I²+Q²) is shown in **Hz²** (raw mHz² ÷ 10⁶; exact raw value on hover, `lib/energy.mjs`), so the alarm threshold reads 2.25 Hz² and is marked with a red tick on each bar; every row says `alarm · ≥ 2.25 Hz²` or `clear · < 2.25 Hz²`. The *Diagnostic report* fills in, alarmed stations turn red on the map (with the lines between them), and the substation beacon turns red (alarm) or blue (clear). The report survives a page reload.
+6. **Nemotron:** **Request interpretation** in the report. The answer is formatted as a report (headings, lists) and labelled AI-generated. When facility data is loaded, the alarmed stations' nearby critical facilities are sent as extra evidence.
+
+## Design system
+
+The interface uses an industrial-monitoring look: neutral near-black, information-dense, no decoration.
+
+| Token | Value | Use |
+|---|---|---|
+| Background | `#09090B` | Page |
+| Panel | `#111113` | Panels |
+| Raised | `#18181B` | Inputs, popups, segmented control |
+| Border | `#27272A` | 1px borders (radius 4–6 px) |
+| Text / secondary | `#EDEDED` / `#8B8B95` | |
+| Accent | `#60A5FA` | The only interactive colour |
+| Warning / fault | `#E0A33A` / `#E5484D` | **Only** for warnings and faults (oscillation severity, alarms, errors) |
+
+- **Fonts:** Inter (interface) and JetBrains Mono (measurements, frequencies, energies, timestamps), bundled through `@fontsource` so builds and the demo work offline. Measurements use tabular numerals.
+- **Station trace colours** (`lib/stations.js`): restrained blue, teal, lilac and grey, never red or amber.
+- **Map:**
+  - the base map labels are dimmed and the voltage colours desaturated (`lib/voltage.mjs`);
+  - criticality rings and facility markers are neutral, with category letters;
+  - notices appear **below** the map, never over it.
+- **3D:** charcoal background, realistic material colours, and glow only while a station is oscillating.
+- **No decoration:** no gradients, glows, pills or emojis. Status lives in the bottom status bar.
 
 ## How it's built
 
 ### Layout
 
 ```
-Header: title + status pills (Stream · FPGA · Nemotron)
-┌ Grid map (MapLibre) ───────────────┬ 3D substation (three.js) ──────┐
-│ lines · substations · plants       │ tabs North|East|South|West     │
-│ station badges · popups · toggle   │ (+ Preview)                    │
-└────────────────────────────────────┴────────────────────────────────┘
-Frequency deviation (canvas waveform, last 20 s)
-Station controls (severity + phase per station; Inject / Clear / Diagnose)
-FPGA verdict (summary, energy bars, phase, diagnosed window, demo check, Nemotron)
+Header: GridSent · Power grid oscillation analysis            (simulated telemetry note)
+┌ Grid topology (60%) ──────────────────────┬ Substation (40%) ─ [1|2|3|4|Preview] ┐
+│ map · Lines / Facilities / Load view       │ three.js model                         │
+│ legend                                     │ readout: substation, kV, f, Δf,        │
+│ topology source · notices                  │ injected, detector                     │
+├ Frequency deviation (full width) ──────────┴────────────────────────────────────────┤
+├ Disturbance injection ────────────────┬ Diagnostic report ──────────────────────────┤
+Status bar: Telemetry · Detector · Nemotron · Topology
 ```
 
-On narrow screens the map and the 3D view stack.
+Below 1,100 px wide, the rows stack into one column.
 
 ### Files
 
 | Path | Role |
 |---|---|
-| `app/page.jsx` | Page composition and app state (assignments, preview, draft edits, map data) |
-| `app/layout.jsx`, `app/style.css` | Shell and global styles (MapLibre CSS imported in the layout) |
-| `app/infra/route.js` | `GET /infra?bbox=s,w,n,e`: map data (below) |
-| `components/StatusBar.jsx` | Stream / FPGA / Nemotron pills, from WebSocket `status` messages |
-| `components/GridMap.jsx` | MapLibre map: layers, tooltips, popups, station badges, line highlights, toggle, legend, US bounds |
-| `components/SubstationScene.jsx` | three.js scene: procedural substation, live glow, 0.25 Hz sway, verdict beacon |
-| `components/StationControls.jsx` | Station cards; Inject / Clear / Diagnose |
-| `components/VerdictPanel.jsx` | FPGA verdict, plus the Explain with Nemotron button and answer |
-| `components/Waveform.jsx` | Canvas line chart (live, and the diagnosed window) |
-| `lib/useSimulator.js` | WebSocket + REST hook: `config`, `state`, `status`, `samples`, `latest` (ref), `diagnosis`, `diagnosisWindow`, `explanations`, `inject()`, `clear()`, `diagnose()`, `explain()` |
-| `lib/overpass.mjs` | Overpass query (clipped to the US border), transmission filters, OSM → GeoJSON, bbox/US limits, server fallback |
-| `lib/voltage.mjs` | Voltage tag parsing, colour bands, MapLibre expressions |
-| `lib/assignments.mjs` | Station ↔ substation assignments and map prefs in `localStorage` |
-| `lib/topology.mjs` | Distance helper; which lines touch or connect alarmed stations |
-| `lib/substationModel.mjs` | OSM tags → 3D model parameters; severity glow colours |
-| `lib/stations.js` | Station names, colours, letters, severity order |
-| `data/infra-snapshot.json` | Brazos Valley grid snapshot: 39 substations, 13 plants, 656 line segments |
-| `scripts/snapshot.mjs` | Regenerates the snapshot (`npm run snapshot`) |
-| `tests/lib.test.mjs` | 13 unit tests for `lib/*.mjs` |
+| `app/page.jsx` | Layout and app state (assignments, regions, preview, draft edits, criticality, Nemotron context) |
+| `app/layout.jsx`, `app/style.css` | Fonts and the design system |
+| `app/infra/route.js` | `GET /infra`: cached regions and facilities, instant "not pre-loaded", opt-in live queries |
+| `app/map-worker/[asset]/route.js` | Serves MapLibre's worker script (MapLibre 6 can't find it inside the Next.js bundle) |
+| `components/GridMap.jsx` | MapLibre map: grid layers, facilities, rings, popups, badges, controls, legend |
+| `components/SubstationScene.jsx` | three.js substation: procedural model, oscillation glow and sway, verdict beacon |
+| `components/Waveform.jsx` | Instrument-style Δf chart (live, and the diagnosed window) |
+| `components/StationControls.jsx` | Disturbance injection table; Inject / Clear / Run diagnosis |
+| `components/VerdictPanel.jsx` | Diagnostic report (detector, analysis, impact, Nemotron) |
+| `components/StatusFooter.jsx` | Bottom status bar |
+| `lib/useSimulator.js` | WebSocket + REST hook; restores the latest diagnosis on reload |
+| `lib/regions.mjs` | Cached region list and `regionFor(bbox)` |
+| `lib/overpass.mjs`, `lib/overpassRetry.mjs` | Overpass queries (US-only), parsing, patient retries |
+| `lib/critical.mjs` | Phase 2: categories, facility query and parsing, nearest-substation attribution, scoring |
+| `lib/reportFormat.mjs` | Nemotron text → report blocks (headings, lists, paragraphs) |
+| `lib/energy.mjs` | Detector energy display: mHz² → Hz², alarm threshold and band edges |
+| `lib/voltage.mjs`, `lib/topology.mjs`, `lib/substationModel.mjs`, `lib/assignments.mjs`, `lib/stations.js` | Voltage colours, line topology, 3D parameters, browser-saved assignments and prefs, station labels and colours |
+| `data/infra-snapshot.json`, `data/regions/*.json` | Cached power-grid regions |
+| `data/facilities/*.json` | Cached critical facilities per region |
+| `scripts/regions.mjs`, `scripts/facilities.mjs`, `scripts/snapshot.mjs` | Download scripts |
+| `tests/lib.test.mjs` | 23 unit tests |
 
-`.mjs` files are plain JavaScript with no React or browser dependencies, so the server route, the snapshot script and the tests all share them.
+`.mjs` files are plain JavaScript without React, shared by the server route, the scripts and the tests.
 
 ### Map data (`/infra`)
 
-- **Source:** OpenStreetMap via the Overpass API, the same data OpenInfraMap draws. We query it ourselves; OpenInfraMap's servers aren't used.
+The public Overpass servers are too slow for interactive use (30–60 s per area, often failing), so regions are cached ahead of time.
+
+| Region (`id`) | Grid | Facilities |
+|---|---|---|
+| San Antonio (`san-antonio`) | ✓ | ✓ |
+| Corpus Christi (`corpus-christi`) | ✓ | ✓ |
+| Laredo (`laredo`) | ✓ | ✓ |
+| Rio Grande Valley (`rio-grande-valley`) | ✓ | — |
+| Houston (`houston`) | ✓ | ✓ |
+| Dallas–Fort Worth (`dallas-fort-worth`) | ✓ | ✓ |
+| Austin (`austin`) | ✓ | ✓ |
+| Brazos Valley (`brazos-valley`, default) | ✓ | ✓ |
+
+- `GET /infra` returns the default region, and `?region=<id>` returns a cached region. `?regions=1` lists the regions and whether each is downloaded.
+- `GET /infra?bbox=s,w,n,e` (**Load view**):
+  - if a cached region covers the view, it's returned instantly; if a region covers most of it, that region is returned with a note;
+  - otherwise the route answers instantly with `404 {code: "not_preloaded"}` and the map offers **Try live load (slow)** (`&live=1`, up to 60 s).
 - **What's kept:**
-  - **transmission substations** (`substation=transmission`, or highest `voltage` ≥ 69 kV; distribution substations dropped);
-  - **power plants** (display only, not assignable);
-  - **power lines** ≥ 69 kV, plus lines with no voltage tag (drawn grey).
-- **Snapshot first:** areas inside the Brazos Valley box (30.18–31.08 °N, 96.86–95.81 °W) are served from `data/infra-snapshot.json`, which is instant and works offline. `?live=1` forces a live query.
-- **Live:** other areas query Overpass with a 25 s budget across three public servers (`OVERPASS_URLS`), and are cached in memory. If all fail, the snapshot is returned with `live_unavailable: true` and a `warning`, which the map shows as a banner. The public Overpass servers are often slow or overloaded; the fallback keeps the demo working.
-- **Limits:**
-  - areas larger than 1.5° per side are refused, and so are areas outside the United States;
-  - the map can't be panned outside the contiguous US;
-  - the query is clipped to the US border (`area["ISO3166-1"="US"]`).
-- **Response:** `{ bbox, fetchedAt, source, substations, outlines, plants, lines }`. Each of the last four is a GeoJSON FeatureCollection. Substation properties: `id` (`"way/123"`), `name`, `operator`, `voltage` (raw tag), `voltagesKv` (highest first), `maxKv`, `substationType`, `outline` (ring of `[lon, lat]` for way substations).
+  - transmission substations (≥ 69 kV or `substation=transmission`);
+  - power plants (display only);
+  - power lines (≥ 69 kV or no voltage tag).
+- **US only:** requests outside the US are refused and the map can't be panned out of the contiguous US. Border regions use the OSM US-border clip.
+- **Response:** `{ bbox, region, source, fetchedAt, substations, outlines, plants, lines, facilities?, pipelines?, facilitiesAvailable }`.
+- **Adding a region:** add it to `REGIONS` in `lib/regions.mjs`, then run `npm run regions -- <id>` and `npm run facilities -- <id>`.
 
-### Map styling
+### Critical facilities (Phase 2)
 
-- **Base:** OpenFreeMap minimal dark style (no API key). If it can't load, a plain dark background is used.
-- **Lines:** coloured by `maxKv` (345 purple, 230 blue, 138 red, 115 orange-red, 69 orange, unknown grey), 1.4–2.6 px wide by voltage.
-- **Plants and substations:** plants are yellow triangles; substations are white dots, with faint outlines from zoom 12.
-- **Station badges:** DOM markers in the station colour. A CSS pulse ring (4 s period, sized by severity) is disabled under `prefers-reduced-motion`.
-- **After Diagnose:**
-  - alarmed badges turn red with `!`; clear ones get `✓`;
-  - lines with an end at an alarmed station glow (`oc-lines-touch`); lines between two alarmed stations glow strongly (`oc-lines-connect`).
-
-### 3D model
-
-- `modelParams()` turns a substation summary into:
-  - one bay per voltage level (gantry, 3-phase busbars, breakers, incoming lattice tower(s) with sagging conductors);
-  - transformers;
-  - a fenced yard sized from the OSM outline;
-  - a control house with a beacon.
-
-  Everything is procedural; there are no 3D files.
-- **Every frame** (no React re-render), the scene reads `latest.current`:
-  - busbar and conductor glow intensity follows the live `deviation_mhz`;
-  - the glow colour follows severity (normal white, mild yellow, moderate orange, severe red; always paired with a text label);
-  - the conductors sway at 0.25 Hz, scaled by amplitude;
-  - the beacon pulses red on an FPGA alarm and turns green when clear.
-- Orbit controls, auto-rotate after 8 s idle. Rendering pauses while the tab is hidden.
+- **8 categories** (`lib/critical.mjs`) with weights: hospitals 5, military 5, water and wastewater 4, major oil & gas 3, emergency 3, airports 3, data centres 2, universities 2. Major oil and gas means refineries and terminals, plus pipelines with a name or operator; minor military features and private airstrips are excluded.
+- **Attribution:** each facility counts once, toward its **nearest transmission substation within 10 km**. A substation's criticality is the sum of its facilities' weights. This is a **proximity estimate**: the UI says "nearest substation for", never "serves".
+- **Map:**
+  - per-category toggles (defaults: hospitals, military, water, oil & gas), remembered in the browser;
+  - criticality rings;
+  - dotted facility → substation lines from zoom 10.5;
+  - dashed pipelines;
+  - the substation popup lists its facilities.
+- **Report:** an *Impact estimate* section for alarmed stations.
+- **Nemotron:** `POST /api/diagnoses/{id}/explain` gets an optional body `{"context": {"critical_facilities": …}}` with the alarmed stations' facilities. The backend passes it to the model as `grid_context`, and the prompt tells the model to treat it as a proximity estimate.
 
 ### Backend contract used
 
-From the simulator (`simulator/README.md`):
-
 | Endpoint / message | Used for |
 |---|---|
-| WS `/ws/stream` → `hello` | `config`, `state` (incl. `severities`, `phase_deg`), `status`, 20 s `history` |
-| WS `samples` | Live waveform, frequencies, 3D glow |
-| WS `state` / `reset` | Current severities and phases |
-| WS `status` | FPGA `idle`/`diagnosing`/`error` + `available` + `last_run_ms`; Nemotron `not_configured`/`ready`/`thinking`/`error` + `model` |
-| WS `diagnosis` | Verdict panel and the diagnosed `window` |
-| WS `explanation` | Nemotron answer (also returned by the explain request) |
-| `PUT /api/anomaly` | Inject: `{North: "severe", …, phase_deg: {North: 0, …}}` |
-| `DELETE /api/anomaly` | Clear |
-| `POST /api/diagnose` | Diagnose |
-| `POST /api/diagnoses/{id}/explain` | Explain with Nemotron |
+| WS `/ws/stream` → `hello` | `config`, `state` (severities, `phase_deg`), `status`, 20 s history |
+| WS `samples` / `state` / `reset` | Chart, readouts, 3D glow; current settings |
+| WS `status` | Status bar (detector and Nemotron states) |
+| WS `diagnosis` / `explanation` | Report, and the analysed window |
+| `PUT` / `DELETE /api/anomaly` | Inject / Clear |
+| `POST /api/diagnose`, `GET /api/diagnoses` | Run diagnosis; restore the latest after a reload |
+| `POST /api/diagnoses/{id}/explain` | Nemotron interpretation (optional `context` body) |
 
 ## Verification
 
-Done during the build:
-- `npm test`: 13/13 pass.
-- `npm run build`: compiles cleanly.
-- Simulator tests: 44 pass.
-- The snapshot was downloaded live with the US-border query.
-- **End-to-end** through the Next.js server against a running simulator and a fake Nemotron model (15/15):
-  - the page, `/infra` (snapshot), non-US and oversized areas rejected;
-  - WebSocket streaming through the proxy, with `hello` status;
-  - Inject with `phase_deg`, and invalid phase → 422;
-  - Diagnose (multi-station, North and South opposite), FPGA status `diagnosing → idle`, the diagnosed window;
-  - Explain through the proxy, Nemotron status `thinking → ready`, the `explanation` broadcast, `/api/status`.
+Done after the redesign:
+- `npm test`: 22/22 pass. Simulator tests: 45 pass. `npm run build`: compiles.
+- **End-to-end** against running servers with a fake Nemotron model (13/13):
+  - the GridSent page and all regions load (20–200 ms) with facilities;
+  - an uncovered area answers instantly (17 ms);
+  - inject, diagnose and explain (with facility context) work through the proxy;
+  - the explanation is broadcast and the latest diagnosis is restorable.
+- **Headless Edge screenshots:**
+  - the header, layout, map (base map, desaturated lines), substation model and readout, chart, injection table, diagnostic report and status bar all render;
+  - an in-browser probe confirmed the substation, plant, facility and ring layers draw features;
+  - Nemotron report formatting is covered by a unit test.
 
-Not verified automatically: **visual rendering** (map, 3D, colours, layout). Check in a browser:
-1. The map opens on College Station with coloured lines, white substation dots and yellow plant triangles, on a dark base map with town names.
-2. Hovering shows tooltips. Clicking a substation shows View in 3D and N/E/S/W.
-3. View in 3D opens a Preview tab. Assign all four; the badges appear and survive a reload.
-4. The Power lines checkbox hides and shows the lines and legend.
-5. Inject North severe and South mild: the North badge pulses, and the 3D North tab glows red and sways.
-6. Diagnose: the FPGA pill shows diagnosing then idle, the verdict fills, the North and South badges turn red, lines light up, and the beacon pulses red.
-7. Explain with Nemotron (if configured): the pill shows thinking, then the answer appears.
-8. You can't pan out of the United States.
-
-## Phase 2 handoff: critical facilities
-
-**Not built yet.** The full spec is in [MVP.md → Phase 2](MVP.md#phase-2--critical-facilities-after-phase-1s-map-works). Where it plugs in:
-
-1. **Data, `lib/overpass.mjs`:**
-   - extend `buildQuery()` with the 8 categories (hospitals, military, water, major oil & gas, emergency, airports, data centres, universities). Keep `(area.us)` and the bbox on every statement. Use `out center tags` for areas; major pipelines need `out geom`;
-   - extend `parseOverpass()` to return a `facilities` FeatureCollection with a `category` property;
-   - add tests in `tests/lib.test.mjs`.
-2. **Scoring, new `lib/critical.mjs`:** a category → tags/weight table; attribute each facility to its **nearest transmission substation within 10 km** (`distanceKm` in `lib/topology.mjs`); compute each substation's score. Pure and unit-tested.
-3. **Snapshot:** run `npm run snapshot` after step 1, then check that Texas A&M and the local hospitals are in it.
-4. **Map, `components/GridMap.jsx`:**
-   - add an `oc-facilities-src` source and one symbol layer per category, with icons from `map.addImage()` like `triangleImage()`. Don't rely on base-map glyphs; they're absent in the offline fallback;
-   - per-category toggles via `setLayoutProperty(…, 'visibility', …)`, like the power-lines toggle, stored with `loadPrefs`/`savePrefs` in `lib/assignments.mjs`;
-   - score halos: a circle layer under `oc-subs`;
-   - the "nearest substation for …" list in the `oc-subs` click popup.
-5. **Verdict, `components/VerdictPanel.jsx`:** an impact line for alarmed stations, from their assigned substation's facility list.
-6. **Nemotron:** the explain endpoint (`simulator/nemotron.py`, `explain_diagnosis`) currently sends only the diagnosis. Phase 2 should add the alarmed stations' facility lists to the evidence (for example, the frontend sends them in the explain request body, or the backend gets a `get_critical_facilities` tool), so the analysis can rank impact.
-
-Keep the phase 1 rules:
-- **"nearest substation", never "serves":** this is a proximity estimate, because OSM doesn't record which substation feeds which facility;
-- US-only queries;
-- the snapshot-first route behaviour;
-- text labels alongside colours.
+Not verified automatically: clicking through the map popups and the Nemotron report with a real model. Browser checklist:
+1. Pick Houston in the Region menu. The map flies there; Facilities shows the counts.
+2. Click a substation: View in 3D, then assign it as station 1. The badge "1" appears and survives a reload.
+3. Inject station 1 severe: the badge pulses red, the conductors glow, the chart shows a 30 mHz sine.
+4. Run diagnosis: the report fills in, the badge turns red with "!", the impact estimate lists nearby facilities.
+5. Request interpretation (with Nemotron configured): a structured report labelled AI-generated.

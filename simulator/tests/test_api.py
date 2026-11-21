@@ -155,6 +155,47 @@ class TestRest(unittest.TestCase):
             finally:
                 server.shutdown()
 
+    def test_explain_with_facility_context(self):
+        """Optional context (frontend Phase 2) reaches the model as grid_context."""
+        seen = []
+
+        class Model(BaseHTTPRequestHandler):
+            def do_POST(self):
+                seen.append(json.loads(self.rfile.read(int(self.headers["Content-Length"]))))
+                body = json.dumps({"id": "t", "object": "chat.completion", "created": 0, "model": "m",
+                                   "choices": [{"index": 0, "finish_reason": "stop",
+                                                "message": {"role": "assistant", "content": "ok"}}]}).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args):
+                pass
+
+        with ThreadingHTTPServer(("127.0.0.1", 0), Model) as server:
+            Thread(target=server.serve_forever, daemon=True).start()
+            env = {"NEMOTRON_BASE_URL": f"http://127.0.0.1:{server.server_port}/v1", "NEMOTRON_MODEL": "m"}
+            try:
+                with patch.dict(os.environ, env), client() as c:
+                    c.put("/api/anomaly", json={"North": "severe"})
+                    d = c.post("/api/diagnose").json()
+                    context = {"critical_facilities": {"stations": {"North": {
+                        "substation": "Jack Creek", "nearest_substation_for": [{"category": "Hospitals"}]}}}}
+                    r = c.post(f"/api/diagnoses/{d['diagnosis_id']}/explain", json={"context": context})
+                    self.assertEqual(r.status_code, 200, r.text)
+                    r = c.post(f"/api/diagnoses/{d['diagnosis_id']}/explain")  # no body still works
+                    self.assertEqual(r.status_code, 200, r.text)
+                    self.assertEqual(c.post(f"/api/diagnoses/{d['diagnosis_id']}/explain",
+                                            json={"bogus": 1}).status_code, 422)
+            finally:
+                server.shutdown()
+        with_ctx = json.loads(seen[0]["messages"][1]["content"])
+        self.assertEqual(with_ctx["grid_context"], context)
+        self.assertIn("grid_context", seen[0]["messages"][0]["content"])  # prompt explains it
+        self.assertNotIn("grid_context", json.loads(seen[1]["messages"][1]["content"]))
+
     def test_pause_resume_reset(self):
         with client() as c:
             self.assertFalse(c.post("/api/stream/pause").json()["running"])

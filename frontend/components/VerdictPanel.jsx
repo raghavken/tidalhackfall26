@@ -1,107 +1,165 @@
 'use client';
 
-// What the FPGA concluded after Diagnose: summary, energy vs severity bands,
-// phase relationships, the 20 s window that was analysed, a demo check, and
-// the optional Nemotron explanation.
+// Diagnostic report after "Run diagnosis". Structured like an engineering
+// report, with each section labelled by where its data comes from:
+//   1. Detector output      — measured (FPGA / bit-exact model)
+//   2. Backend analysis     — computed from the telemetry window
+//   3. Impact estimate      — OpenStreetMap proximity estimate
+//   4. Nemotron             — AI-generated interpretation (clearly separated)
 
 import Waveform from './Waveform';
-import { STATION_COLORS } from '../lib/stations';
+import { STATION_COLORS, STATION_LABEL, STATION_NAMES, stationTitle } from '../lib/stations';
+import { inlineSegments, parseReport } from '../lib/reportFormat.mjs';
+import { BAND_EDGES_RAW, formatEnergy, rawEnergyTitle } from '../lib/energy.mjs';
 
 const LOG_MIN = 2;   // 10^2
 const LOG_MAX = 9;   // 10^9
-const EDGES = [{ value: 2_250_000, label: 'mild' }, { value: 9_000_000, label: 'moderate' },
-  { value: 36_000_000, label: 'severe' }];
-
 const pct = energy => {
   const v = Math.log10(Math.max(energy, 10 ** LOG_MIN));
   return Math.min(100, Math.max(0, (v - LOG_MIN) / (LOG_MAX - LOG_MIN) * 100));
 };
+const sevClass = s => (s === 'severe' ? 'sev-fault' : s === 'normal' ? '' : 'sev-warn');
 
 function summary(diagnosis) {
   const { analysis, fpga_results: results } = diagnosis;
   const sev = Object.fromEntries(results.map(r => [r.station, r.severity]));
-  const list = analysis.affected_stations.map(s => `${s} (${sev[s]})`).join(', ');
+  const list = analysis.affected_stations.map(s => `${stationTitle(s)} (${sev[s]})`).join(', ');
   if (analysis.classification === 'none') return 'No 0.25 Hz oscillation detected at any station.';
-  if (analysis.classification === 'single_station') return `Single-station oscillation at ${list}.`;
+  if (analysis.classification === 'single_station') return `Single-station oscillation: ${list}.`;
   const pairs = analysis.phase_relationships
-    .map(p => `${p.stations.join('–')} ${p.relationship.replace('_', ' ')}`).join('; ');
-  return `Multi-station oscillation: ${list}${pairs ? `; ${pairs}` : ''}.`;
+    .map(p => `${p.stations.map(s => STATION_LABEL[s]).join('–')} ${p.relationship.replace('_', ' ')}`).join('; ');
+  return `Multi-station oscillation: ${list}${pairs ? ` · phase ${pairs}` : ''}.`;
 }
 
-function EnergyBars({ results }) {
-  return <div className="energy">
-    <div className="energy-scale" aria-hidden="true">
-      {EDGES.map(e => <span key={e.label} className="edge" style={{ left: `${pct(e.value)}%` }}>
-        <em>{e.label}</em></span>)}
-    </div>
-    {results.map(r => <div key={r.station} className="energy-row">
-      <span className="energy-name" style={{ color: STATION_COLORS[r.station] }}>{r.station}</span>
-      <div className="energy-track">
-        {EDGES.map(e => <span key={e.label} className="edge-line" style={{ left: `${pct(e.value)}%` }} />)}
-        <div className="energy-bar" style={{ width: `${pct(r.energy)}%`, background: STATION_COLORS[r.station] }} />
-      </div>
-      <span className="energy-value">{r.energy.toLocaleString()} · <b>{r.severity}</b>
-        {r.alarm ? ' · alarm' : ''}</span>
-    </div>)}
-    <p className="muted small">FPGA energy I² + Q², log scale. Alarm threshold 2,250,000 (≈ 5 mHz).</p>
-  </div>;
+// ---- Nemotron text -> structured report (parsing in lib/reportFormat.mjs) ----
+const inline = text => inlineSegments(text).map((seg, i) =>
+  seg.bold ? <strong key={i}>{seg.text}</strong> : <span key={i}>{seg.text}</span>);
+
+function formatReport(text) {
+  return parseReport(text).map((b, i) => {
+    if (b.type === 'h') return <h4 key={i}>{inline(b.text)}</h4>;
+    if (b.type === 'p') return <p key={i}>{inline(b.text)}</p>;
+    const Tag = b.ordered ? 'ol' : 'ul';
+    return <Tag key={i}>{b.items.map((item, j) => <li key={j}>{inline(item)}</li>)}</Tag>;
+  });
 }
 
-function NemotronBox({ diagnosis, explanation, nemotron, onExplain, busy, disabled }) {
+function Section({ title, source, children }) {
+  return <section className="report-section">
+    <header><h3>{title}</h3>{source && <span className="source">{source}</span>}</header>
+    {children}
+  </section>;
+}
+
+function DetectorTable({ results }) {
+  return <div className="table-wrap"><table className="data-table">
+    <thead><tr>
+      <th scope="col">Stn</th>
+      <th scope="col" className="num" title="Detector energy I²+Q², converted from mHz² to Hz² (÷ 10⁶)">Energy (Hz²)</th>
+      <th scope="col" className="bar-col">Log scale · <span className="sev-fault">| alarm 2.25 Hz²</span> · ticks 9, 36 Hz²</th>
+      <th scope="col">Band</th><th scope="col">Alarm</th>
+    </tr></thead>
+    <tbody>{results.map(r => <tr key={r.station}>
+      <th scope="row"><span className="stn-tag" style={{ '--stn': STATION_COLORS[r.station] }}>{STATION_LABEL[r.station]}</span></th>
+      <td className="num mono" title={rawEnergyTitle(r.energy)}>{formatEnergy(r.energy)}</td>
+      <td className="bar-col"><div className="energy-track">
+        {BAND_EDGES_RAW.map(e => <span key={e.raw} className={e.alarm ? 'edge-line alarm' : 'edge-line'}
+          style={{ left: `${pct(e.raw)}%` }} />)}
+        <div className={`energy-bar ${r.alarm ? (r.severity === 'severe' ? 'is-fault' : 'is-warn') : ''}`}
+          style={{ width: `${pct(r.energy)}%` }} />
+      </div></td>
+      <td className={sevClass(r.severity)}>{r.severity}</td>
+      <td className={r.alarm ? 'sev-fault' : 'muted'}>{r.alarm ? 'alarm · ≥ 2.25 Hz²' : 'clear · < 2.25 Hz²'}</td>
+    </tr>)}</tbody>
+  </table></div>;
+}
+
+function NemotronSection({ diagnosis, explanation, nemotron, onExplain, busy, disabled }) {
   const thinking = nemotron?.state === 'thinking' || busy;
   const notConfigured = nemotron?.state === 'not_configured';
-  return <div className="nemotron">
+  return <Section title="Nemotron interpretation" source="AI-generated · not a measurement">
+    {explanation
+      ? <div className="ai-report">
+        {formatReport(explanation.analysis)}
+        <p className="ai-meta">Generated by <span className="mono">{explanation.model}</span> from the measured
+          and computed evidence above. Station key: 1 = North, 2 = East, 3 = South, 4 = West.
+          Verify against the detector output before acting.</p>
+      </div>
+      : <p className="muted">{notConfigured
+        ? 'Nemotron is not configured on the backend (NEMOTRON_BASE_URL / NEMOTRON_MODEL).'
+        : 'Request an interpretation of this diagnosis.'}</p>}
     <div className="actions">
-      <button onClick={() => onExplain(diagnosis.diagnosis_id)} disabled={disabled || thinking || notConfigured}
-        title={notConfigured ? 'Set NEMOTRON_BASE_URL and NEMOTRON_MODEL in the backend .env' : undefined}>
-        Explain with Nemotron</button>
-      {thinking && <span role="status"><span className="spinner inline" aria-hidden="true" /> Nemotron is analysing this diagnosis…</span>}
-      {notConfigured && <span className="muted small">Nemotron not configured on the backend.</span>}
+      <button onClick={() => onExplain(diagnosis.diagnosis_id)} disabled={disabled || thinking || notConfigured}>
+        {explanation ? 'Regenerate interpretation' : 'Request interpretation'}</button>
+      {thinking && <span className="muted small" role="status"><span className="spinner" aria-hidden="true" /> Analysing…</span>}
     </div>
-    {explanation && <div className="nemotron-answer" aria-live="polite">
-      <h3>Nemotron analysis <span className="muted small">· {explanation.model}</span></h3>
-      <p>{explanation.analysis}</p>
-    </div>}
-  </div>;
+  </Section>;
 }
 
-export default function VerdictPanel({ diagnosis, window: windowSamples, diagnosing, assignments,
+export default function VerdictPanel({ diagnosis, window: windowSamples, diagnosing, assignments, impacts = {},
   explanation, nemotron, onExplain, explainBusy, disabled }) {
   if (diagnosing) {
-    return <div className="verdict-wait" role="status"><span className="spinner" aria-hidden="true" />
-      Sending 2,400 measurements to the detector…</div>;
+    return <p className="muted pad" role="status"><span className="spinner" aria-hidden="true" /> Sending 2,400
+      measurements (600 per station) to the detector…</p>;
   }
   if (!diagnosis) {
-    return <p className="muted">Inject a disturbance, then press <b>Diagnose</b> to send the last
-      20 seconds to the FPGA detector.</p>;
+    return <p className="muted pad">No diagnosis yet. Inject a disturbance, then <b>Run diagnosis</b> to send the
+      last 20 s of simulated telemetry to the detector.</p>;
   }
-  const detector = diagnosis.detector === 'hardware' ? 'DE1 FPGA' : 'Python reference (FPGA model)';
+  const detector = diagnosis.detector === 'hardware' ? 'DE1 FPGA' : 'Python reference (bit-exact FPGA model)';
   const alarmed = diagnosis.fpga_results.filter(r => r.alarm);
-  return <div className="verdict">
-    <p className="verdict-summary">{summary(diagnosis)}</p>
-    <p className="muted small">
-      Diagnosis #{diagnosis.diagnosis_id} · {detector} · {diagnosis.window.packets.toLocaleString()} measurements
+  const { analysis } = diagnosis;
+  return <div className="report">
+    <p className="report-summary">{summary(diagnosis)}</p>
+    <p className="report-meta mono">#{diagnosis.diagnosis_id} · {detector} · 2,400 samples · 0.25 Hz bin
       {diagnosis.run_ms != null ? ` · ${diagnosis.run_ms} ms` : ''}
-      {' · '}<span className={`demo-check ${diagnosis.matches_request ? 'ok' : 'bad'}`}
-        title="Demo check: does the FPGA result match the injected settings?">
-        demo check {diagnosis.matches_request ? '✓' : '✗'}</span>
-    </p>
-    {alarmed.length > 0 && <ul className="where">{alarmed.map(r => <li key={r.station}>
-      <b style={{ color: STATION_COLORS[r.station] }}>{r.station}</b>
-      {' — '}{assignments[r.station]?.name || 'unassigned substation'}: {r.severity} oscillation
-      (≈ {diagnosis.analysis.amplitude_mhz[r.station]} mHz)</li>)}</ul>}
-    <EnergyBars results={diagnosis.fpga_results} />
-    {diagnosis.analysis.phase_relationships.length > 0 && <>
-      <h3>Phase relationships</h3>
-      <ul>{diagnosis.analysis.phase_relationships.map(p => <li key={p.stations.join('-')}>
-        {p.stations.join(' and ')}: <b>{p.relationship.replace('_', ' ')}</b>
-        {' '}({Math.round(p.phase_difference_rad * 180 / Math.PI)}°)</li>)}</ul>
-    </>}
-    {windowSamples && <>
-      <h3>The 20 s window that was diagnosed</h3>
-      <Waveform samples={windowSamples} height={170} label="The 600-sample window sent to the FPGA detector" />
-    </>}
-    <NemotronBox diagnosis={diagnosis} explanation={explanation} nemotron={nemotron}
+      {' · '}<span title="Does the detector result match the injected settings?">
+        demo check: {diagnosis.matches_request ? 'matches injection' : 'differs from injection'}</span></p>
+
+    <Section title="Detector output" source="measured · 600-sample window per station">
+      <DetectorTable results={diagnosis.fpga_results} />
+    </Section>
+
+    <Section title="Backend analysis" source="computed from the simulated telemetry window">
+      <div className="table-wrap"><table className="data-table compact">
+        <thead><tr><th scope="col">Stn</th><th scope="col" className="num">0.25 Hz amplitude (mHz)</th>
+          <th scope="col" className="num">Phase (°)</th></tr></thead>
+        <tbody>{STATION_NAMES.map(name => <tr key={name}>
+          <th scope="row">{STATION_LABEL[name]}</th>
+          <td className="num mono">{analysis.amplitude_mhz[name]?.toFixed(2)}</td>
+          <td className="num mono">{analysis.phase_rad?.[name] != null
+            ? Math.round(analysis.phase_rad[name] * 180 / Math.PI) : '—'}</td>
+        </tr>)}</tbody>
+      </table></div>
+      {analysis.phase_relationships.length > 0 && <ul className="plain-list">
+        {analysis.phase_relationships.map(p => <li key={p.stations.join('-')}>
+          Stations {p.stations.map(s => STATION_LABEL[s]).join(' and ')}: {p.relationship.replace('_', ' ')}
+          <span className="mono muted"> ({Math.round(p.phase_difference_rad * 180 / Math.PI)}°)</span></li>)}
+      </ul>}
+      {windowSamples && <>
+        <p className="caption">Analysed window (20 s, Δf in mHz)</p>
+        <Waveform samples={windowSamples} height={140} showLegend={false}
+          label="The 600-sample window sent to the detector" />
+      </>}
+    </Section>
+
+    {alarmed.length > 0 && <Section title="Impact estimate"
+      source="OpenStreetMap · nearest transmission substation within 10 km · not service areas">
+      <ul className="plain-list">{alarmed.map(r => {
+        const impact = impacts[r.station];
+        const sub = assignments[r.station];
+        return <li key={r.station}>
+          <b>{stationTitle(r.station)}</b>{sub ? ` · ${sub.name}` : ' · unassigned'}{' — '}
+          {!sub ? <span className="muted">no substation assigned; assign one on the map to estimate impact</span>
+            : impact && !impact.unknown && impact.text
+            ? <>nearest substation for {impact.text} <span className="mono muted">(criticality {impact.entry.score})</span></>
+            : impact && !impact.unknown ? <span className="muted">no critical facilities within 10 km</span>
+              : <span className="muted">facility data not loaded for this substation</span>}
+        </li>;
+      })}</ul>
+    </Section>}
+
+    <NemotronSection diagnosis={diagnosis} explanation={explanation} nemotron={nemotron}
       onExplain={onExplain} busy={explainBusy} disabled={disabled} />
   </div>;
 }
