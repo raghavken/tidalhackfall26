@@ -37,5 +37,11 @@ test-faults: vectors build/tb_faults
 	$(VVP) build/tb_faults
 test-tools: test-integration
 	$(PYTHON) tools/test_tools.py
-test: test-uart test-parser test-echo test-detector test-formatter test-faults test-tools
+test: test-uart test-parser test-echo test-detector test-formatter test-faults test-tools test-jtag
 	@echo "PASS all FPGA MVP tests"
+
+.PHONY: test-jtag
+build/tb_jtag: tb/tb_jtag.v $(RTL) | build
+	$(IVERILOG) -g2001 -Wall -DDE1_VIRTUAL_JTAG -s tb_jtag -o $@ $(RTL) $<
+test-jtag: vectors build/tb_jtag
+	$(VVP) build/tb_jtag

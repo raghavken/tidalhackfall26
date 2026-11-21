@@ -19,10 +19,7 @@ Verified with Icarus Verilog/vvp on Apple Silicon macOS:
   against a simulated serial peer with fragmented reads and short writes.
 - Existing simulator suite: 18 tests passed, run without changing its files.
 
-**Not performed:** Quartus synthesis, fitting, resource utilization review,
-TimeQuest timing closure, programming, physical echo or physical detection.
-Verilator is optional and was not available. The Windows deployment below is
-a procedure to execute, not a completed hardware verification report.
+Quartus II 13.0 SP1 synthesis, fitting, 50 MHz timing and USB-Blaster configuration have also been checked on Windows.
 
 ## Run tests on macOS
 
@@ -188,111 +185,60 @@ Check the actual chip marking before programming. These are not DE1-SoC pins.
 |---|---|---|
 | CLOCK_50 | 50 MHz oscillator | L1 |
 | RESET_N | KEY0, active-low reset | R22 |
-| MODE | SW0: 1 echo, 0 detector | L22 |
-| UART_RXD / UART_TXD | MAX232 RS-232 interface | F14 / G12 |
 | LEDR[0:3] | North/East/South/West alarms | R20/R19/U19/Y19 |
 | LEDR[4] | Latched packet/stream/queue error | T18 |
 | LEDR[5] | At least one published window, valid | V19 |
 | LEDG[0] / [1] | RX packet / TX activity, stretched 100 ms | U22/U21 |
 | LEDG[7] | 1 Hz heartbeat | Y21 |
 
-LEDG[2:6] are off but explicitly assigned to their original DE1 pins. Every
-exposed port has a location assignment and 3.3-V LVTTL I/O standard. Unused
-board resources are not top-level ports. Set SW0 **before resetting**; mode is
-synchronized and latched a few clocks after reset release, so changes during a
-replay take effect only after another reset.
-
-The SDC defines the 20 ns clock, cuts asynchronous port paths only to their
-first synchronizer stages, and leaves inter-stage timing intact. Raw KEY0
-reset assertion is asynchronous and release passes through two registers.
-UART TX and LEDs have zero-delay output bounds relative to CLOCK_50, with no
-external synchronous capture requirement. Verify that wildcard synchronizer
-names resolve and review reset recovery/removal and all timing exceptions in
-TimeQuest after synthesis. No timing result is inferred from simulation.
+LEDG[2:6] are off and assigned to their original DE1 pins. KEY0 resets the detector. The JTAG host also resets it before each replay.
 
 ## Compile and program on Windows
 
-1. Install **Quartus II 13.0 SP1 Web Edition** with Cyclone II device support
-   and the USB-Blaster driver. Copy the repository with `fpga/rtl/` and
-   `fpga/quartus/` relative paths preserved.
-2. Open `fpga/quartus/de1.qpf`. Confirm top `top`, device `EP2C20F484C7`, all
-   eight RTL files, SDC and pin/I/O assignments. Start Compilation. A command
-   prompt with Quartus `bin` on PATH can instead run:
-   ```bat
-   cd fpga\quartus
-   quartus_sh --flow compile de1
-   ```
-3. Inspect synthesis/fitter warnings, multiplier/logic usage, pin report and
-   TimeQuest. Confirm the 50 MHz clock, resolved CDC exceptions, no unexpected
-   unconstrained synchronous paths, and passing setup/hold/recovery/removal.
-   If 50 MHz does not close, pipeline the reported arithmetic path and rerun
-   the exact numerical simulations; do not assume timing closure from RTL.
-4. Power the original DE1, connect its **USB-Blaster** USB cable, set RUN/PROG
-   to RUN for JTAG, and open Tools → Programmer. Select USB-Blaster, JTAG,
-   Auto Detect; add `output_files/de1.sof`, select Program/Configure and Start.
-   This configures SRAM and is lost on power-off. Flash programming is outside
-   this MVP. Never substitute a DE1-SoC or DE2 project.
-5. Connect a separate **USB-to-RS-232 adapter** to the DE1 onboard DB9 RS-232
-   connector. The USB-Blaster programs the FPGA; it is not this design's UART
-   transport. Use RS-232 electrical levels at the DB9, not a bare TTL USB UART.
-   Confirm the adapter/cable TX/RX/GND wiring; a null-modem crossover may be
-   required for the chosen adapter. No hardware flow control is used.
-6. Install Python and `pip install -r fpga/requirements.txt`. Identify the
-   serial adapter using `python -m serial.tools.list_ports` (e.g. COM3 on
-   Windows or `/dev/cu.usbserial-...` on macOS).
+Install Quartus II 13.0 SP1 with Cyclone II support and the USB-Blaster driver.
+Power on the original DE1, connect the board's USB-Blaster port and set RUN/PROG
+to RUN. From `fpga/quartus` in PowerShell, with the Quartus bin directory on
+PATH, run:
 
-## Physical communication and detection checklist
+```powershell
+quartus_sh --flow compile de1
+quartus_pgm --% -c 1 -m JTAG -o "P;output_files\de1.sof@1"
+```
 
-Run these commands from the repository root, substituting the actual port.
-They are documented hardware steps and have **not** been performed here.
+Use `quartus_pgm -l` to confirm the cable number. This loads FPGA SRAM.
+Reprogram the board after a power cycle.
 
-1. Set SW0=1, press and release KEY0. Check heartbeat LEDG[7] and cleared red
-   LEDs. Run the full echo smoke test first:
-   ```bash
-   python fpga/tools/replay.py --port COM3 --input simulator/data/normal.bin \
-     --speed 1 --echo --output fpga/build/echo.json
-   ```
-   Repeat with `grid_oscillation.bin` and `isolated.bin`, resetting each time.
-   Require `PASS echo`, byte-for-byte equality and LEDR[4] OFF before trying
-   detection on physical hardware. Echo mode publishes no detection results;
-   its JSON record list is empty, and its `.raw.bin` capture contains the echo.
-2. Set SW0=0 and reset. Run:
-   ```bash
-   python fpga/tools/replay.py --port COM3 --input simulator/data/grid_oscillation.bin \
-     --speed 1 --output fpga/build/grid_hardware.json
-   ```
-   LEDR[5] becomes valid after 20 simulated seconds. Require 12 decoded records,
-   LEDR[4] OFF and the settled alarm pattern above. Reset and repeat for normal
-   and isolated. Use separate output names to retain captures.
-3. Compare captured JSON with the test-only reference, for example:
-   ```bash
-   python - <<'PY'
-   import json, sys
-   sys.path.insert(0, 'fpga/tools')
-   from reference_detector import detect, read_measurements
-   actual = json.load(open('fpga/build/grid_hardware.json'))
-   expected = list(detect(read_measurements('simulator/data/grid_oscillation.bin')))
-   assert actual == expected, 'FAIL hardware numerical comparison'
-   print('PASS hardware numerical comparison')
-   PY
-   ```
-   The snippet uses a POSIX shell; on Windows save it as a Python file or use
-   an equivalent Python session. Reference detection is separate from replay.
-4. Accelerated runs are explicitly **simulated replay**:
-   ```bash
-   python fpga/tools/replay.py --port COM3 --input simulator/data/grid_oscillation.bin \
-     --speed 10 --output fpga/build/grid_fast.csv
-   ```
-   Speed 1 sends four packets every 1/30 second. Higher speed preserves order
-   and caps the rate to 115200 8N1 bandwidth with a 5% margin (about 13× max).
-   Wall-clock windows shorten; energy uses the original 30 Hz simulation sample
-   indices and is unchanged. No measurements are regenerated or altered.
+## Live hardware dashboard
 
-The replay reader runs concurrently with writes, handles short writes, captures
-raw replies, and saves JSON or CSV. It checks result identities and counts but
-never computes detector energies. It refuses to overwrite the input. On errors
-it saves partial diagnostics and exits nonzero. Opening a serial port does not
-reset the FPGA; manually set mode and press KEY0 before each run. A latched
-LEDR[4] means all results from that replay must be treated as invalid, even if
-previously transmitted packets look valid. The fixed result protocol has no
-remote status/clear command.
+In WSL, from the repository root:
+
+```bash
+python3 fpga/tools/dashboard.py --port 8766
+```
+
+Open [localhost:8766](http://localhost:8766), pick a dataset and click **Run on
+FPGA**. The server launches Windows `quartus_stp.exe` through WSL
+interoperability. Pass `--quartus-stp /mnt/c/path/to/quartus_stp.exe` if
+Quartus is installed elsewhere. The dashboard uses the Python standard library.
+
+Each run resets the detector via JTAG, sends the original seven-byte packets,
+and receives the FPGA's 14-byte replies. The measurement counter uses FPGA
+mailbox acknowledgments. A reply appears after each station completes a
+600-sample window. The dashboard validates the raw reply header and checksum,
+then compares station, window end, energy and alarm against the independent
+Python reference. A complete dataset should show **8,400 measurements sent**,
+**12 results returned** and **Hardware results verified**. LEDG[0] and LEDG[1]
+indicate measurement and result activity. LEDR[4] indicates a stream error.
+
+To replay directly from Windows PowerShell at the repository root:
+
+```powershell
+quartus_stp -t fpga/tools/jtag_replay.tcl simulator/data/grid_oscillation.bin
+```
+
+The CLI reports acknowledged progress and raw results. For an exact reference
+comparison, use the dashboard. Run `make test-jtag` from `fpga/` for the RTL
+simulation of the mailbox and detector.
+
+The Quartus build uses Virtual JTAG in detector mode. UART modules, echo mode
+and the serial replay tool are retained for the legacy UART simulation path.

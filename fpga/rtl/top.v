@@ -3,19 +3,29 @@ module top #(
     parameter CLOCK_HZ = 50000000,
     parameter BAUD = 115200,
     parameter [54:0] ENERGY_THRESHOLD = 55'd2250000
-)(input wire CLOCK_50, input wire RESET_N, input wire MODE,
-  input wire UART_RXD, output wire UART_TXD,
+)(input wire CLOCK_50, input wire RESET_N,
+`ifndef DE1_VIRTUAL_JTAG
+  input wire MODE, input wire UART_RXD, output wire UART_TXD,
+`endif
   output wire [5:0] LEDR, output wire [7:0] LEDG);
     // Asynchronous reset assertion; release takes two clock edges.
     (* ASYNC_REG = "TRUE" *) reg reset_meta, reset_sync;
-    (* ASYNC_REG = "TRUE" *) reg mode_meta, mode_sync;
-    reg echo_mode;
-    reg [2:0] mode_settle;
+`ifdef DE1_VIRTUAL_JTAG
+    wire restart;
+    wire reset_n = reset_sync && !restart;
+`else
     wire reset_n = reset_sync;
+`endif
     always @(posedge CLOCK_50 or negedge RESET_N) begin
         if(!RESET_N) begin reset_meta<=0; reset_sync<=0; end
         else begin reset_meta<=1; reset_sync<=reset_meta; end
     end
+`ifdef DE1_VIRTUAL_JTAG
+    wire echo_mode = 1'b0;
+`else
+    (* ASYNC_REG = "TRUE" *) reg mode_meta, mode_sync;
+    reg echo_mode;
+    reg [2:0] mode_settle;
     always @(posedge CLOCK_50 or negedge reset_n) begin
         if(!reset_n) begin mode_meta<=0; mode_sync<=0; echo_mode<=0; mode_settle<=0; end
         else begin
@@ -24,10 +34,18 @@ module top #(
             if(mode_settle==3) echo_mode<=mode_sync;
         end
     end
+`endif
     wire [7:0] rx_data;
     wire rx_valid, framing_error;
+`ifdef DE1_VIRTUAL_JTAG
+    wire [7:0] tx_data;
+    wire tx_valid, tx_ready;
+    wire tx_busy = tx_valid && tx_ready;
+    assign framing_error = 1'b0;
+`else
     uart_rx #(.CLOCK_HZ(CLOCK_HZ),.BAUD(BAUD)) receiver(
         CLOCK_50,reset_n,UART_RXD,rx_data,rx_valid,framing_error);
+`endif
     wire [1:0] station_id;
     wire [15:0] sample_index;
     wire signed [15:0] sample_mhz;
@@ -48,13 +66,20 @@ module top #(
     correlator #(.ENERGY_THRESHOLD(ENERGY_THRESHOLD)) detector(
         CLOCK_50,reset_n,detector_enable,station_id,sample_index,sample_mhz,
         accepted,result_valid,result_station,result_index,result_energy,result_alarm,alarms,published);
+`ifdef DE1_VIRTUAL_JTAG
+    jtag_transport transport(CLOCK_50,reset_sync,restart,rx_data,rx_valid,
+        tx_data,tx_valid,tx_ready,stream_error);
+`else
     wire [7:0] tx_data;
     wire tx_valid, tx_ready, tx_busy;
+`endif
     result_formatter formatter(CLOCK_50,reset_n,!stream_error && !packet_error && !framing_error && !overflow,
         echo_mode,sample_valid,station_id,sample_index,sample_mhz,
         result_valid,result_station,result_index,result_energy,result_alarm,tx_data,tx_valid,tx_ready,overflow);
+`ifndef DE1_VIRTUAL_JTAG
     uart_tx #(.CLOCK_HZ(CLOCK_HZ),.BAUD(BAUD)) transmitter(
         CLOCK_50,reset_n,tx_data,tx_valid,tx_ready,UART_TXD,tx_busy);
+`endif
     reg [31:0] rx_activity, tx_activity, heartbeat;
     always @(posedge CLOCK_50 or negedge reset_n) begin
         if(!reset_n) begin rx_activity<=0; tx_activity<=0; heartbeat<=0; end

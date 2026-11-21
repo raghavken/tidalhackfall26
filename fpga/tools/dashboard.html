@@ -1,0 +1,104 @@
+<!doctype html>
+<html lang="en">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Oscillation Cartographer</title>
+<style>
+:root{color-scheme:dark;font:16px system-ui,sans-serif;background:#0b111a;color:#eef5ff}
+*{box-sizing:border-box}body{max-width:1120px;margin:auto;padding:clamp(18px,5vw,64px)}
+h1{font-size:clamp(2rem,5vw,3.4rem);letter-spacing:-.06em;margin:.2em 0}
+h2{font-size:1.15rem;margin:0 0 14px}p{color:#aec0d6;line-height:1.5}
+header{border-bottom:1px solid #304159;padding-bottom:24px;margin-bottom:24px}
+.controls,.cards{display:flex;gap:14px;flex-wrap:wrap;align-items:end}
+.controls label{display:grid;gap:6px;font-size:.9rem}
+button,select{font:inherit;padding:10px 14px;border:1px solid #527495;border-radius:8px}
+button{background:#82edca;color:#05271e;font-weight:700;cursor:pointer}
+button:disabled{opacity:.55;cursor:wait}
+.cards{align-items:stretch;margin:24px 0}.card{flex:1 1 240px}
+.card,section{background:#131f2e;border:1px solid #304159;border-radius:12px;padding:20px}
+.metric{font-size:1.65rem;font-weight:700;margin:8px 0}.muted{color:#aec0d6}
+progress{width:100%;accent-color:#82edca}code{color:#a0b9d4;overflow-wrap:anywhere}
+.table{overflow:auto}table{width:100%;border-collapse:collapse;white-space:nowrap}
+th,td{text-align:left;padding:10px;border-bottom:1px solid #304159}th{color:#aec0d6}
+.good{color:#82edca}.bad{color:#ffb69e}#error{overflow-wrap:anywhere}
+</style>
+<header>
+<h1>Oscillation Cartographer</h1>
+<p>DE1 hardware replay over USB-Blaster</p>
+<div class="controls">
+<label>Dataset<select id="scenario"><option value="grid_oscillation">Grid oscillation</option><option value="normal">Normal</option><option value="isolated">Isolated oscillation</option></select></label>
+<button id="start">Run on FPGA</button>
+</div>
+<p id="status" role="status">Ready to replay</p><p id="error" class="bad" hidden></p>
+</header>
+<div class="cards">
+<div class="card"><h2>Measurements sent</h2><div class="metric" id="sent">0</div><progress id="progress" value="0" max="1"></progress><p id="sample"></p><code id="inputHex"></code></div>
+<div class="card"><h2>Results returned</h2><div class="metric" id="received">0</div><p id="verified">Packets are checked against the Python reference.</p></div>
+</div>
+<section><h2>FPGA result packets</h2><div class="table"><table>
+<thead><tr><th>Station</th><th>Window end sample</th><th>Energy</th><th>Alarm</th><th>Reference</th><th>Raw packet</th></tr></thead>
+<tbody id="rows"></tbody></table></div></section>
+<script>
+const get = id => document.getElementById(id);
+const fmt = new Intl.NumberFormat();
+let starting = false;
+let shown = '';
+function render(run) {
+  const labels = {idle:'Ready to replay', running:'Replaying over JTAG', verified:'Hardware results verified', failed:'Replay failed'};
+  get('status').textContent = labels[run.state];
+  get('status').className = run.state === 'verified' ? 'good' : '';
+  get('error').hidden = !run.error;
+  get('error').textContent = run.error || '';
+  get('start').disabled = starting || run.state === 'running';
+  get('scenario').disabled = get('start').disabled;
+  get('progress').max = run.total || 1;
+  get('progress').value = run.sent;
+  get('sent').textContent = fmt.format(run.sent) + (run.total ? ' / ' + fmt.format(run.total) : '');
+  get('sample').textContent = run.sample ? run.sample.station + ' · sample ' + run.sample.index + ' · ' + run.sample.deviation + ' mHz' : '';
+  get('inputHex').textContent = run.sample?.hex || '';
+  get('received').textContent = fmt.format(run.results.length);
+  get('verified').textContent = run.results.length ? run.results.filter(row => row.verified).length + ' match the Python reference' : 'Packets are checked against the Python reference.';
+  const signature = JSON.stringify(run.results);
+  if (signature === shown) return;
+  shown = signature;
+  const rows = run.results.map(result => {
+    const row = document.createElement('tr');
+    const values = [result.station, result.window_end_sample, fmt.format(BigInt(result.energy)),
+      result.alarm ? 'On' : 'Off', result.verified ? 'Match' : 'Mismatch', result.hex];
+    values.forEach((value, index) => {
+      const cell = row.insertCell();
+      cell.textContent = value;
+      if (index === 3 && result.alarm) cell.className = 'bad';
+      if (index === 4) cell.className = result.verified ? 'good' : 'bad';
+    });
+    return row;
+  });
+  get('rows').replaceChildren(...rows);
+}
+async function refresh() {
+  try {
+    const response = await fetch('/api/run');
+    if (!response.ok) throw Error('Dashboard connection failed');
+    render(await response.json());
+  } catch (error) {
+    get('status').textContent = error.message;
+  }
+}
+get('start').onclick = async () => {
+  starting = true;
+  get('start').disabled = true;
+  try {
+    const response = await fetch('/api/run', {method:'POST', headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({scenario:get('scenario').value})});
+    if (!response.ok) throw Error((await response.json()).error);
+  } catch (error) {
+    get('status').textContent = error.message;
+  } finally {
+    starting = false;
+    await refresh();
+  }
+};
+refresh();
+setInterval(refresh, 750);
+</script>
+</html>
